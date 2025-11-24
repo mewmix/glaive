@@ -248,6 +248,7 @@ fun GlaiveScreen() {
                         FileCard(
                             item = item,
                             isSelected = selectedPaths.contains(item.path),
+                            sortMode = sortMode,
                             onClick = {
                                 if (selectedPaths.isNotEmpty()) {
                                     selectedPaths = if (selectedPaths.contains(item.path)) selectedPaths - item.path else selectedPaths + item.path
@@ -339,6 +340,10 @@ fun GlaiveScreen() {
                 },
                 onShare = {
                     sharePath(context, contextMenuTarget!!)
+                    contextMenuTarget = null
+                },
+                onSelect = {
+                    selectedPaths = selectedPaths + contextMenuTarget!!.path
                     contextMenuTarget = null
                 }
             )
@@ -552,6 +557,7 @@ fun BreadcrumbStrip(currentPath: String, onPathJump: (String) -> Unit) {
 fun FileCard(
     item: GlaiveItem,
     isSelected: Boolean,
+    sortMode: SortMode,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -616,8 +622,16 @@ fun FileCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            
+            val infoText = when {
+                item.type == GlaiveItem.TYPE_DIR -> "Folder"
+                sortMode == SortMode.DATE -> formatDate(item.mtime)
+                sortMode == SortMode.SIZE -> formatSize(item.size)
+                else -> formatSize(item.size)
+            }
+            
             Text(
-                text = if (item.type == GlaiveItem.TYPE_DIR) "Folder" else formatSize(item.size),
+                text = infoText,
                 style = TextStyle(
                     color = Color.Gray,
                     fontSize = 12.sp
@@ -767,12 +781,14 @@ fun ContextMenuSheet(
     onCut: () -> Unit,
     onDelete: () -> Unit,
     onEdit: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onSelect: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DeepSpace) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(item.name, style = MaterialTheme.typography.titleLarge, color = SoftWhite)
             Spacer(modifier = Modifier.height(16.dp))
+            ContextMenuItem("Select", Icons.Default.Check, onSelect)
             ContextMenuItem("Copy", Icons.Default.Share, onCopy)
             ContextMenuItem("Cut", Icons.Default.Edit, onCut)
             ContextMenuItem("Delete", Icons.Default.Delete, onDelete, DangerRed)
@@ -923,6 +939,13 @@ fun formatSize(bytes: Long): String {
         idx++
     }
     return String.format(Locale.US, "%.1f %s", value, units[idx])
+}
+
+fun formatDate(millis: Long): String {
+    if (millis <= 0) return "--"
+    val date = java.util.Date(millis)
+    val format = java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.US)
+    return format.format(date)
 }
 
 private fun sharePath(context: Context, item: GlaiveItem) {

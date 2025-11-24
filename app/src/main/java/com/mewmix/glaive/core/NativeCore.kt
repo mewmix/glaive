@@ -48,7 +48,7 @@ object NativeCore {
                 path = fullPath,
                 type = type, // Map your C types to Kotlin constants
                 size = size,
-                mtime = 0 // Skip time for speed unless crucial
+                mtime = java.io.File(fullPath).lastModified() // Populate mtime
             ))
         }
         
