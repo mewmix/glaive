@@ -66,6 +66,10 @@ import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
 import kotlin.system.measureTimeMillis
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 
 private const val DEFAULT_ROOT = "/storage/emulated/0"
 
@@ -139,6 +143,7 @@ fun GlaiveScreen() {
         modifier = Modifier
             .fillMaxSize()
             .background(VoidBlack)
+            .crtScanlines()
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         StatusDeck(
@@ -470,67 +475,125 @@ private fun GlaiveRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
+    
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(36.dp) // Condensed height for maximum scanning speed
-            .background(if (selected) Color(0xFF112211) else Color.Transparent)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
+            .height(44.dp) // Slight increase for "Touch Terminal" feel
+            .background(
+                if (selected) MatrixGreen.copy(alpha = 0.2f) else Color.Transparent
             )
-            .padding(horizontal = 8.dp), // Tighter padding
+            .combinedClickable(
+                onClick = { 
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) // Mechanical click feel
+                    onClick() 
+                },
+                onLongClick = { 
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick() 
+                }
+            )
+            .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 1. COMPACT INDICATOR
-        // Monospace, fixed width, no extra padding
-        val (indicator, color) = when(item.type) {
-            GlaiveItem.TYPE_DIR -> "/" to MatrixGreen
-            GlaiveItem.TYPE_IMG -> "IMG" to Color(0xFFE0E0E0)
-            GlaiveItem.TYPE_VID -> "VID" to Color(0xFFBB86FC)
-            GlaiveItem.TYPE_APK -> "APK" to Color(0xFF03DAC6)
-            else -> "DOC" to MetaGray
+        // Hex Indicator
+        val hexCode = item.name.hashCode().toString(16).take(4).uppercase()
+        
+        BasicText(
+            text = "[ $hexCode ]",
+            style = TextStyle(
+                color = if (selected) MatrixGreen else Color(0xFF445544),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp
+            ),
+            modifier = Modifier.padding(end = 8.dp)
+        )
+
+        // Icon/Type Indicator
+        val (iconChar, typeColor) = when(item.type) {
+            GlaiveItem.TYPE_DIR -> "📁" to MatrixGreen
+            GlaiveItem.TYPE_IMG -> "🖼️" to Color(0xFF00E5FF)
+            GlaiveItem.TYPE_VID -> "📼" to Color(0xFFFF4081)
+            GlaiveItem.TYPE_APK -> "📦" to Color(0xFFB2FF59)
+            else -> "📄" to MetaGray
         }
 
         BasicText(
-            text = indicator,
-            style = TextStyle(
-                color = color,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp, // Slightly larger for readability
-                fontWeight = FontWeight.Bold
-            ),
-            modifier = Modifier.width(36.dp)
+            text = iconChar,
+            style = TextStyle(fontSize = 14.sp),
+            modifier = Modifier.padding(end = 12.dp)
         )
 
-        // 2. NAME (The Hero)
-        BasicText(
-            text = item.name,
-            style = TextStyle(
-                color = White,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 14.sp
-            ),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-
-        // 3. META (Only what matters)
-        // If Dir: Show nothing (or item count if you want to be fancy later)
-        // If File: Show size
-        if (item.type != GlaiveItem.TYPE_DIR) {
-            val sizeStr = formatSize(item.size) // Implement a fast formatter
+        // The Data
+        Column(modifier = Modifier.weight(1f)) {
             BasicText(
-                text = sizeStr,
+                text = item.name,
                 style = TextStyle(
-                    color = MetaGray,
+                    color = if (item.type == GlaiveItem.TYPE_DIR) White else Color(0xFFCCCCCC),
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            
+            // Sub-data line (Permissions | Size)
+            if (item.type != GlaiveItem.TYPE_DIR) {
+                BasicText(
+                    text = "RW- | ${formatSize(item.size)}",
+                    style = TextStyle(
+                        color = Color(0xFF556655),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
                 )
+            }
+        }
+        
+        // Directional Chevron
+        if (item.type == GlaiveItem.TYPE_DIR) {
+            BasicText(
+                text = ">>",
+                style = TextStyle(color = MatrixGreen, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             )
         }
     }
+    
+    // Divider line between items
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(Color(0xFF112211))
+    )
+}
+
+// Simulates scanlines and phosphor glow
+fun Modifier.crtScanlines(color: Color = MatrixGreen) = this.drawWithContent {
+    drawContent()
+    val scanLineHeight = 4.dp.toPx()
+    val height = size.height
+    
+    // Draw Scanlines
+    for (y in 0 until height.toInt() step scanLineHeight.toInt()) {
+        drawRect(
+            color = Color.Black.copy(alpha = 0.3f),
+            topLeft = Offset(0f, y.toFloat()),
+            size = Size(size.width, 1f)
+        )
+    }
+    
+    // Optional: Vignette or Glow
+    drawRect(
+        brush = Brush.radialGradient(
+            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f)),
+            center = center,
+            radius = size.minDimension / 0.8f
+        ),
+        blendMode = BlendMode.Multiply
+    )
 }
 
 private data class TelemetryReadout(
