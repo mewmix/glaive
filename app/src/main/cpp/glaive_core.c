@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <arm_neon.h>
 #include <android/log.h>
 
@@ -74,8 +75,22 @@ int compare_entries(const void *a, const void *b) {
 }
 
 // ==========================================
-// NEON SEARCH ENGINE (128-bit SIMD)
+// SEARCH HELPERS
 // ==========================================
+static inline int has_glob_tokens(const char *pattern) {
+    while (*pattern) {
+        if (*pattern == '*' || *pattern == '?') return 1;
+        pattern++;
+    }
+    return 0;
+}
+
+static inline unsigned char fold_ci(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return (unsigned char)(c + 32);
+    return c;
+}
+
+// NEON substring match for literal queries
 int neon_contains(const char *haystack, const char *needle, size_t n_len) {
     size_t h_len = strlen(haystack);
     if (h_len < n_len) return 0;
@@ -107,6 +122,42 @@ int neon_contains(const char *haystack, const char *needle, size_t n_len) {
         }
     }
     return 0;
+}
+
+// Glob matcher with ASCII folding and non-recursive backtracking
+static int glob_match_ci(const char *text, const char *pattern) {
+    const char *t = text;
+    const char *p = pattern;
+    const char *star = NULL;
+    const char *match = NULL;
+
+    while (*t) {
+        unsigned char tc = fold_ci((unsigned char)*t);
+        unsigned char pc = (unsigned char)*p;
+
+        if (pc && (pc == '?' || fold_ci(pc) == tc)) {
+            t++;
+            p++;
+            continue;
+        }
+        if (pc == '*') {
+            star = ++p;
+            match = t;
+            continue;
+        }
+        if (star) {
+            p = star;
+            t = ++match;
+            continue;
+        }
+        return 0;
+    }
+    while (*p == '*') p++;
+    return *p == '\0';
+}
+
+static inline int matches_query(const char *name, const char *query, size_t qlen, int glob_mode) {
+    return glob_mode ? glob_match_ci(name, query) : neon_contains(name, query, qlen);
 }
 
 // ==========================================
@@ -194,7 +245,7 @@ Java_com_mewmix_glaive_core_NativeCore_nativeList(JNIEnv *env, jclass clazz, jst
 // JNI: SEARCH (Recursive)
 // ==========================================
 // Simplified implementation for brevity
-void recursive_scan(const char* base, const char* query, size_t qlen, JNIEnv *env, jobjectArray result, int* idx, int max, jclass cls, jmethodID ctor) {
+void recursive_scan(const char* base, const char* query, size_t qlen, int glob_mode, JNIEnv *env, jobjectArray result, int* idx, int max, jclass cls, jmethodID ctor) {
     if (*idx >= max) return;
 
     DIR* dir = opendir(base);
@@ -210,10 +261,10 @@ void recursive_scan(const char* base, const char* query, size_t qlen, JNIEnv *en
 
         if (d->d_type == DT_DIR) {
              if (strcmp(d->d_name, "Android") != 0) { // Skip Android data
-                 recursive_scan(path, query, qlen, env, result, idx, max, cls, ctor);
+                 recursive_scan(path, query, qlen, glob_mode, env, result, idx, max, cls, ctor);
              }
         } else {
-            if (neon_contains(d->d_name, query, qlen)) {
+            if (matches_query(d->d_name, query, qlen, glob_mode)) {
                 // Match found
                 jstring jName = (*env)->NewStringUTF(env, d->d_name);
                 jstring jPath = (*env)->NewStringUTF(env, path);
@@ -235,13 +286,15 @@ JNIEXPORT jobjectArray JNICALL
 Java_com_mewmix_glaive_core_NativeCore_nativeSearch(JNIEnv *env, jclass clazz, jstring jRoot, jstring jQuery) {
     const char *root = (*env)->GetStringUTFChars(env, jRoot, NULL);
     const char *query = (*env)->GetStringUTFChars(env, jQuery, NULL);
+    size_t qlen = strlen(query);
+    int glob_mode = has_glob_tokens(query);
 
     jclass cls = (*env)->FindClass(env, "com/mewmix/glaive/data/GlaiveItem");
     jmethodID ctor = (*env)->GetMethodID(env, cls, "<init>", "(Ljava/lang/String;Ljava/lang/String;IJJ)V");
     jobjectArray result = (*env)->NewObjectArray(env, 500, cls, NULL); // Cap at 500
 
     int count = 0;
-    recursive_scan(root, query, strlen(query), env, result, &count, 500, cls, ctor);
+    recursive_scan(root, query, qlen, glob_mode, env, result, &count, 500, cls, ctor);
 
     (*env)->ReleaseStringUTFChars(env, jRoot, root);
     (*env)->ReleaseStringUTFChars(env, jQuery, query);
