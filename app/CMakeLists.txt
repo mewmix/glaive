@@ -9,15 +9,14 @@ add_library(
 
 # Target high performance
 set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Ofast -march=armv8-a+crypto -flto")
 target_compile_options(glaive_core PRIVATE
-    -O3
     -Wall
     -std=c99
     -fno-exceptions
     -ffast-math
     -funroll-loops
     -fomit-frame-pointer
-    -march=armv8-a+simd
 )
 
 find_library(log-lib log)

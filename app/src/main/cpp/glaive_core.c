@@ -1,6 +1,10 @@
 #include <jni.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,17 +16,23 @@
 #define LOG_TAG "GLAIVE_C"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ==========================================
-// FAST TYPE HASHING
-// ==========================================
-// Maps extensions to integers to avoid string comparison chains.
+// Kernel struct for getdents64
+struct linux_dirent64 {
+    unsigned long long d_ino;
+    long long d_off;
+    unsigned short d_reclen;
+    unsigned char d_type;
+    char d_name[];
+};
+
 typedef enum {
     TYPE_UNKNOWN = 0,
     TYPE_DIR = 1,
     TYPE_IMG = 2,
     TYPE_VID = 3,
     TYPE_APK = 4,
-    TYPE_DOC = 5
+    TYPE_DOC = 5,
+    TYPE_FILE = 6
 } FileType;
 
 static inline unsigned int hash_ext(const char *str) {
@@ -37,9 +47,8 @@ static inline FileType get_type(const char *name, int d_type) {
 
     const char *dot = strrchr(name, '.');
     if (!dot) return TYPE_UNKNOWN;
-    dot++; // Skip dot
+    dot++;
 
-    // Precomputed hashes (DJB2)
     switch (hash_ext(dot)) {
         case 193490416: /* png */
         case 193497021: /* jpg */
@@ -48,30 +57,8 @@ static inline FileType get_type(const char *name, int d_type) {
         case 193498837: /* mkv */ return TYPE_VID;
         case 193486360: /* apk */ return TYPE_APK;
         case 193499403: /* pdf */ return TYPE_DOC;
-        default: return TYPE_UNKNOWN;
+        default: return TYPE_FILE;
     }
-}
-
-// ==========================================
-// DATA STRUCTURES
-// ==========================================
-typedef struct {
-    char *name;
-    char *path;
-    int type;
-    long size;
-    long mtime;
-} Entry;
-
-// Custom QSort Comparator: Dirs first, then Name Case-Insensitive
-int compare_entries(const void *a, const void *b) {
-    Entry *ea = (Entry *)a;
-    Entry *eb = (Entry *)b;
-
-    if ((ea->type == TYPE_DIR) != (eb->type == TYPE_DIR)) {
-        return (eb->type == TYPE_DIR) - (ea->type == TYPE_DIR);
-    }
-    return strcasecmp(ea->name, eb->name);
 }
 
 // ==========================================
@@ -90,7 +77,6 @@ static inline unsigned char fold_ci(unsigned char c) {
     return c;
 }
 
-// NEON substring match for literal queries
 int neon_contains(const char *haystack, const char *needle, size_t n_len) {
     size_t h_len = strlen(haystack);
     if (h_len < n_len) return 0;
@@ -104,8 +90,6 @@ int neon_contains(const char *haystack, const char *needle, size_t n_len) {
         uint8x16_t block = vld1q_u8((const uint8_t*)(haystack + i));
         uint8x16_t block_lower = vorrq_u8(block, v_case);
         uint8x16_t eq = vceqq_u8(v_first, block_lower);
-
-        // Check 128 bits at once
         uint64x2_t fold = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(eq)));
         if (vgetq_lane_u64(fold, 0) | vgetq_lane_u64(fold, 1)) {
             for (int k = 0; k < 16; k++) {
@@ -115,16 +99,15 @@ int neon_contains(const char *haystack, const char *needle, size_t n_len) {
             }
         }
     }
-    // Cleanup tail
+
     for (; i < h_len; i++) {
         if (tolower(haystack[i]) == first) {
-             if (strncasecmp(haystack + i, needle, n_len) == 0) return 1;
+            if (strncasecmp(haystack + i, needle, n_len) == 0) return 1;
         }
     }
     return 0;
 }
 
-// Glob matcher with ASCII folding and non-recursive backtracking
 static int glob_match_ci(const char *text, const char *pattern) {
     const char *t = text;
     const char *p = pattern;
@@ -161,117 +144,125 @@ static inline int matches_query(const char *name, const char *query, size_t qlen
 }
 
 // ==========================================
-// JNI: LIST DIRECTORY
+// FAST LISTING CORE
 // ==========================================
-#define BUFFER_CAPACITY (2 * 1024 * 1024) // 2MB Chunk
-#define TYPE_DIR 1
-#define TYPE_FILE 2
+static inline unsigned char fast_get_type(const char *name, int name_len) {
+    if (name_len < 4) return TYPE_FILE;
 
-// Write helper
-static inline void write_byte(unsigned char** ptr, unsigned char val) { *(*ptr)++ = val; }
-static inline void write_long(unsigned char** ptr, long val) {
-    // Little Endian packing
-    *(*ptr)++ = (unsigned char)(val);
-    *(*ptr)++ = (unsigned char)(val >> 8);
-    *(*ptr)++ = (unsigned char)(val >> 16);
-    *(*ptr)++ = (unsigned char)(val >> 24);
-    *(*ptr)++ = (unsigned char)(val >> 32);
-    *(*ptr)++ = (unsigned char)(val >> 40);
-    *(*ptr)++ = (unsigned char)(val >> 48);
-    *(*ptr)++ = (unsigned char)(val >> 56);
+    const char *ptr = name + name_len - 4;
+    uint32_t tail;
+    __asm__ volatile (
+        "ldr %w[val], [%[addr]] \n\t"
+        "orr %w[val], %w[val], #0x20202020 \n\t"
+        : [val] "=r" (tail)
+        : [addr] "r" (ptr)
+        : "cc"
+    );
+
+    switch (tail) {
+        case 0x676e702e: return TYPE_IMG; // .png
+        case 0x67706a2e: return TYPE_IMG; // .jpg
+        case 0x34706d2e: return TYPE_VID; // .mp4
+        case 0x766b6d2e: return TYPE_VID; // .mkv
+        case 0x6b70612e: return TYPE_APK; // .apk
+        case 0x6664702e: return TYPE_DOC; // .pdf
+        default: return TYPE_FILE;
+    }
 }
 
-JNIEXPORT jobject JNICALL
-Java_com_mewmix_glaive_core_NativeCore_nativeListBuffer(JNIEnv *env, jclass clazz, jstring jPath) {
+JNIEXPORT jint JNICALL
+Java_com_mewmix_glaive_core_NativeCore_nativeFillBuffer(JNIEnv *env, jobject clazz, jstring jPath, jobject jBuffer, jint capacity) {
+    if (capacity <= 0) return 0;
+
     const char *path = (*env)->GetStringUTFChars(env, jPath, NULL);
-    DIR *dir = opendir(path);
-    if (!dir) {
+    unsigned char *buffer = (*env)->GetDirectBufferAddress(env, jBuffer);
+    if (!buffer) {
         (*env)->ReleaseStringUTFChars(env, jPath, path);
-        return NULL;
+        return -2;
     }
 
-    // Allocate a raw block of memory. 
-    // In a real crusade, you'd reuse this buffer to avoid malloc overhead.
-    unsigned char* buffer = malloc(BUFFER_CAPACITY);
-    unsigned char* head = buffer;
-    unsigned char* end = buffer + BUFFER_CAPACITY;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd == -1) {
+        (*env)->ReleaseStringUTFChars(env, jPath, path);
+        return -1;
+    }
 
-    struct dirent *d;
-    char full_path[4096];
+    unsigned char *head = buffer;
+    unsigned char *end = buffer + capacity;
+    char kbuf[4096];
+    struct linux_dirent64 *d;
     struct stat st;
+    int nread;
 
-    while ((d = readdir(dir)) != NULL) {
-        if (d->d_name[0] == '.') continue;
-        
-        size_t name_len = strlen(d->d_name);
-        if (name_len > 255) name_len = 255; // Clamp for protocol
-        
-        // Check bounds: Type(1) + Len(1) + Name(N) + Size(8)
-        if (head + 1 + 1 + name_len + 8 >= end) break; // Buffer full (handle logic later)
+    while ((nread = syscall(__NR_getdents64, fd, kbuf, sizeof(kbuf))) > 0) {
+        int bpos = 0;
+        while (bpos < nread) {
+            d = (struct linux_dirent64 *)(kbuf + bpos);
+            bpos += d->d_reclen;
 
-        // 1. TYPE
-        unsigned char type = (d->d_type == DT_DIR) ? TYPE_DIR : TYPE_FILE;
-        // Simple heuristic for specific types if FILE
-        if (type == TYPE_FILE) {
-             // Re-use your fast hash_ext logic here to set TYPE_IMG, TYPE_APK etc.
-             // For now, packing simplified types.
-             const char *dot = strrchr(d->d_name, '.');
-             if (dot) {
-                 dot++;
-                 switch (hash_ext(dot)) {
-                    case 193490416: /* png */
-                    case 193497021: /* jpg */
-                    case 2090499160: /* jpeg */ type = 2; break; // TYPE_IMG
-                    case 193500088: /* mp4 */
-                    case 193498837: /* mkv */ type = 3; break; // TYPE_VID
-                    case 193486360: /* apk */ type = 4; break; // TYPE_APK
-                    case 193499403: /* pdf */ type = 5; break; // TYPE_DOC
-                 }
-             }
+            if (d->d_name[0] == '.') continue;
+
+            int name_len = 0;
+            while (d->d_name[name_len] && name_len < 255) name_len++;
+
+            if (head + 2 + name_len + 16 > end) {
+                close(fd);
+                (*env)->ReleaseStringUTFChars(env, jPath, path);
+                return (jint)(head - buffer);
+            }
+
+            unsigned char type = TYPE_UNKNOWN;
+            int64_t size = 0;
+            int64_t time = 0;
+
+            if (d->d_type == DT_DIR) {
+                type = TYPE_DIR;
+            } else if (d->d_type == DT_REG) {
+                type = fast_get_type(d->d_name, name_len);
+                if (fstatat(fd, d->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                    size = st.st_size;
+                    time = st.st_mtime;
+                }
+            } else {
+                if (fstatat(fd, d->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                    if (S_ISDIR(st.st_mode)) {
+                        type = TYPE_DIR;
+                    } else {
+                        type = fast_get_type(d->d_name, name_len);
+                        size = st.st_size;
+                        time = st.st_mtime;
+                    }
+                } else {
+                    type = TYPE_FILE;
+                }
+            }
+
+            if (type == TYPE_UNKNOWN) type = fast_get_type(d->d_name, name_len);
+            if (type == TYPE_UNKNOWN) type = TYPE_FILE;
+
+            *head++ = type;
+            *head++ = (unsigned char)name_len;
+            memcpy(head, d->d_name, name_len);
+            head += name_len;
+            memcpy(head, &size, sizeof(int64_t));
+            head += sizeof(int64_t);
+            memcpy(head, &time, sizeof(int64_t));
+            head += sizeof(int64_t);
         }
-        write_byte(&head, type);
-
-        // 2. NAME LENGTH
-        write_byte(&head, (unsigned char)name_len);
-
-        // 3. NAME BYTES
-        memcpy(head, d->d_name, name_len);
-        head += name_len;
-
-        // 4. SIZE (Only stat if needed, expensive!)
-        long size = 0;
-        if (d->d_type != DT_DIR) {
-            snprintf(full_path, sizeof(full_path), "%s/%s", path, d->d_name);
-            // stat is the bottleneck. Consider fstatat or skipping size for speed mode
-            if (stat(full_path, &st) == 0) size = st.st_size;
-        }
-        write_long(&head, size);
     }
-    
-    closedir(dir);
-    (*env)->ReleaseStringUTFChars(env, jPath, path);
 
-    // Create a DirectByteBuffer. This wraps the C memory without copying.
-    // Java will free it if we attach a clean-up, but for now we return a copy
-    // to ensure safety, or use NewDirectByteBuffer if you manage lifecycle manually.
-    // Safest for MVP:
-    // jobject directBuffer = (*env)->NewDirectByteBuffer(env, buffer, head - buffer);
-    
-    // Note: If you use malloc + NewDirectByteBuffer, the JVM doesn't free the C memory automatically 
-    // unless you rely on sun.misc.Cleaner or copy it. 
-    // BETTER APPROACH for JNI: Return a standard Byte Array copy for safety unless you are an expert.
-    
-    jbyteArray retArr = (*env)->NewByteArray(env, (jsize)(head - buffer));
-    (*env)->SetByteArrayRegion(env, retArr, 0, (jsize)(head - buffer), (jbyte*)buffer);
-    
-    free(buffer);
-    return retArr;
+    if (nread == -1) {
+        LOGE("getdents64 failed: %s", strerror(errno));
+    }
+
+    close(fd);
+    (*env)->ReleaseStringUTFChars(env, jPath, path);
+    return (jint)(head - buffer);
 }
 
 // ==========================================
-// JNI: SEARCH (Recursive)
+// SEARCH PIPELINE
 // ==========================================
-// Simplified implementation for brevity
 void recursive_scan(const char* base, const char* query, size_t qlen, int glob_mode, JNIEnv *env, jobjectArray result, int* idx, int max, jclass cls, jmethodID ctor) {
     if (*idx >= max) return;
 
@@ -287,15 +278,13 @@ void recursive_scan(const char* base, const char* query, size_t qlen, int glob_m
         snprintf(path, sizeof(path), "%s/%s", base, d->d_name);
 
         if (d->d_type == DT_DIR) {
-             if (strcmp(d->d_name, "Android") != 0) { // Skip Android data
-                 recursive_scan(path, query, qlen, glob_mode, env, result, idx, max, cls, ctor);
-             }
+            if (strcmp(d->d_name, "Android") != 0) {
+                recursive_scan(path, query, qlen, glob_mode, env, result, idx, max, cls, ctor);
+            }
         } else {
             if (matches_query(d->d_name, query, qlen, glob_mode)) {
-                // Match found
                 jstring jName = (*env)->NewStringUTF(env, d->d_name);
                 jstring jPath = (*env)->NewStringUTF(env, path);
-                // Mock size/time for search speed
                 jobject item = (*env)->NewObject(env, cls, ctor, jName, jPath, get_type(d->d_name, d->d_type), (jlong)0, (jlong)0);
                 (*env)->SetObjectArrayElement(env, result, *idx, item);
                 (*idx)++;
@@ -318,7 +307,7 @@ Java_com_mewmix_glaive_core_NativeCore_nativeSearch(JNIEnv *env, jclass clazz, j
 
     jclass cls = (*env)->FindClass(env, "com/mewmix/glaive/data/GlaiveItem");
     jmethodID ctor = (*env)->GetMethodID(env, cls, "<init>", "(Ljava/lang/String;Ljava/lang/String;IJJ)V");
-    jobjectArray result = (*env)->NewObjectArray(env, 500, cls, NULL); // Cap at 500
+    jobjectArray result = (*env)->NewObjectArray(env, 500, cls, NULL);
 
     int count = 0;
     recursive_scan(root, query, qlen, glob_mode, env, result, &count, 500, cls, ctor);

@@ -44,7 +44,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
@@ -55,6 +54,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -228,7 +229,6 @@ fun GlaiveScreen() {
                 },
                 onPathJump = { navigateTo(it) },
                 onHomeJump = { navigateTo("/storage/emulated/0"); currentTab = 0 },
-                onTermuxJump = { navigateTo("/data/data/com.termux/files/home"); currentTab = 0 },
                 currentTab = currentTab,
                 onTabChange = { currentTab = it },
                 isGridView = isGridView,
@@ -440,7 +440,6 @@ fun GlaiveHeader(
     onToggleSearch: () -> Unit,
     onPathJump: (String) -> Unit,
     onHomeJump: () -> Unit,
-    onTermuxJump: () -> Unit,
     currentTab: Int,
     onTabChange: (Int) -> Unit,
     isGridView: Boolean,
@@ -448,6 +447,22 @@ fun GlaiveHeader(
     onAddClick: () -> Unit
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(isSearchActive) {
+        if (isSearchActive) {
+            focusRequester.requestFocus()
+            keyboardController?.show()
+        } else {
+            keyboardController?.hide()
+        }
+    }
+
+    val headerTitle = when {
+        isSearchActive -> "Search"
+        currentTab == 1 -> "Recent Files"
+        else -> "Browse"
+    }
 
     Column(
         modifier = Modifier
@@ -476,7 +491,7 @@ fun GlaiveHeader(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = if (isSearchActive) "Search" else if (currentTab == 1) "Recent Files" else File(currentPath).name.ifEmpty { "Storage" },
+                text = headerTitle,
                 style = TextStyle(
                     color = SoftWhite,
                     fontSize = 28.sp,
@@ -498,9 +513,6 @@ fun GlaiveHeader(
                     }
                     IconButton(onClick = onHomeJump, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
                         Icon(imageVector =Icons.Default.Home, contentDescription = "Home", tint = SoftWhite)
-                    }
-                    IconButton(onClick = onTermuxJump, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
-                        Icon(imageVector =Icons.Default.PlayArrow, contentDescription = "Termux", tint = AccentBlue)
                     }
                 }
 
@@ -536,7 +548,9 @@ fun GlaiveHeader(
                         value = searchQuery,
                         onValueChange = onSearchQueryChange,
                         textStyle = TextStyle(color = SoftWhite, fontSize = 16.sp),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focusRequester),
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(
@@ -560,9 +574,15 @@ fun BreadcrumbStrip(currentPath: String, onPathJump: (String) -> Unit) {
     val segments = remember(currentPath) {
         val list = mutableListOf<Pair<String, String>>()
         var acc = ""
-        currentPath.split("/").filter { it.isNotEmpty() }.forEach {
-            acc += "/$it"
-            list.add(it to acc)
+        val hidden = setOf("storage", "emulated")
+        currentPath.split("/").filter { it.isNotEmpty() }.forEach { segment ->
+            acc += "/$segment"
+            if (hidden.contains(segment)) return@forEach
+            val label = when (segment) {
+                "0" -> "Internal"
+                else -> segment
+            }
+            list.add(label to acc)
         }
         if (list.isEmpty()) listOf("Root" to "/") else list
     }
