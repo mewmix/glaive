@@ -11,10 +11,11 @@ data class GlaiveItem(
     val mtime: Long
 ) {
     companion object {
-        const val TYPE_DIR = 1
+        const val TYPE_DIR = 4 // DT_DIR
+        const val TYPE_FILE = 8 // DT_REG
         const val TYPE_IMG = 2
         const val TYPE_VID = 3
-        const val TYPE_APK = 4
+        const val TYPE_APK = 100
         const val TYPE_DOC = 5
     }
 }

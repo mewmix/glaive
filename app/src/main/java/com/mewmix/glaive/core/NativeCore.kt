@@ -31,10 +31,22 @@ object NativeCore {
             // Reconstruct full path here or lazily
             val fullPath = if (currentPath.endsWith("/")) "$currentPath$name" else "$currentPath/$name"
 
+            var type = typeRaw
+            // Fix: Handle DT_LNK (10) or DT_UNKNOWN (0) or any mismatch
+            // If it's not explicitly marked as a dir, check the filesystem to be sure.
+            // This is crucial for symlinks to directories.
+            if (type != GlaiveItem.TYPE_DIR) {
+                if (java.io.File(fullPath).isDirectory) {
+                    type = GlaiveItem.TYPE_DIR
+                } else if (type == 0) {
+                     type = GlaiveItem.TYPE_FILE
+                }
+            }
+
             list.add(GlaiveItem(
                 name = name,
                 path = fullPath,
-                type = typeRaw, // Map your C types to Kotlin constants
+                type = type, // Map your C types to Kotlin constants
                 size = size,
                 mtime = 0 // Skip time for speed unless crucial
             ))
@@ -46,6 +58,14 @@ object NativeCore {
     }
 
     suspend fun search(root: String, query: String): List<GlaiveItem> = withContext(Dispatchers.IO) {
-        nativeSearch(root, query)?.filterNotNull()?.toList() ?: emptyList()
+        val results = nativeSearch(root, query)?.filterNotNull() ?: return@withContext emptyList()
+        results.map { item ->
+            if (item.type == 0) {
+                val isDir = java.io.File(item.path).isDirectory
+                item.copy(type = if (isDir) GlaiveItem.TYPE_DIR else GlaiveItem.TYPE_FILE)
+            } else {
+                item
+            }
+        }
     }
 }
