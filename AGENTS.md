@@ -170,3 +170,29 @@ Permissions: Ask for MANAGE_EXTERNAL_STORAGE once. If denied, show a terminal er
 
 Signed:
 Project Glaive Architect
+
+7. PHASE II // ARM DOMINION PLAN
+
+Objective: Demand fealty from ARMv8. Every cycle must fuel instant discovery/share. Phase II turns the MVP blade into the most unholy efficient interceptor on Android 14.
+
+Native Core (libglaive.so)
+- Build the Magic Bayonet: replace extension hashing with magic byte signatures + SIMD-assisted sniffing (offset tables for MP3/MP4/PNG/APK/ZIP, fallback to hash when header unavailable).
+- Scatter/Gather Engine: spin parallel `opendir` raids for DCIM, Downloads, Movies, Documents simultaneously; merge results via pointer array to keep JNI crossings minimal.
+- Pointer Forge: migrate `Entry` storage to arena allocators (single `malloc` per batch) so hot loops stay zero-garbage; reuse struct pools between scans.
+- Hunter Stream: convert `nativeSearch` into a lock-free ring buffer pushing partial hits back to Kotlin every 32 matches; DFS stack must be manual + cache-friendly (struct-of-arrays).
+- NEON Oaths: expand substring NEON routines to support glob tokens (`*`, `?`) and fold ASCII casing branchlessly; benchmark with perf counters and drop any branch that wastes cycles.
+
+Kotlin Orchestrator (GlaiveRepo)
+- Window Keepers: implement the "View Window" cache that holds the last 512 visible entries + metadata deltas for instant scroll/backtrack.
+- Scatter Dispatcher: spin coroutines per root, fan-in via Channel, and throttle UI updates to <15 ms diff chunks; strictly Dispatchers.IO.
+- Action Relays: wire swipe-to-share + tap-to-open pipeline by calling native type detection → specific intents (Video = VLC, Image = ACTION_VIEW).
+- Permission Ritual: single MANAGE_EXTERNAL_STORAGE ask; if denied, throw full-screen terminal error and exit the process.
+
+HUD (Compose)
+- Terminal Void Refinement: enforce JetBrains Mono, OLED black background, 12-15 rows only; integrate Breadcrumb Blade with gesture history.
+- Gesture Arsenal: implement swipe-right to share (haptic ping) and pull-to-search (debounced 150 ms) with zero fluff animations.
+- Telemetry Strip: show latency per action (ms) + selection count; highlight anything >50 ms in Error Red.
+
+Verification
+- Continuous Profiling: ship a dev-only overlay toggled via long-press that streams FPS, scan throughput, heap usage—if alloc > 0 in hot loops, halt.
+- Release Gate: APK size budget <3 MB, cold start <500 ms on Pixel 7, Hunter search first hit <250 ms on 10k file tree.
