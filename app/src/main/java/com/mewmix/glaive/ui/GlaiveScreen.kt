@@ -23,6 +23,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -83,6 +84,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
+import com.mewmix.glaive.core.DebugLogger
 import com.mewmix.glaive.core.FileOperations
 import com.mewmix.glaive.core.NativeCore
 import com.mewmix.glaive.core.RecentFilesManager
@@ -148,6 +150,23 @@ fun GlaiveScreen() {
     var maximizedPane by remember { mutableStateOf(-1) }
     
     val scope = rememberCoroutineScope()
+
+    fun panePath(index: Int): String = if (index == 0) currentPath else secondaryPath
+    fun setPanePath(index: Int, path: String) {
+        if (index == 0) currentPath = path else secondaryPath = path
+    }
+    fun paneSearchQuery(index: Int): String = if (index == 0) searchQuery else secondarySearchQuery
+    fun setPaneSearchQuery(index: Int, query: String) {
+        if (index == 0) searchQuery = query else secondarySearchQuery = query
+    }
+    fun paneIsSearchActive(index: Int): Boolean = if (index == 0) isSearchActive else secondaryIsSearchActive
+    fun setPaneSearchActive(index: Int, active: Boolean) {
+        if (index == 0) isSearchActive = active else secondaryIsSearchActive = active
+    }
+    fun paneCurrentTab(index: Int): Int = if (index == 0) currentTab else secondaryCurrentTab
+    fun setPaneCurrentTab(index: Int, tab: Int) {
+        if (index == 0) currentTab = tab else secondaryCurrentTab = tab
+    }
 
     fun handlePaste(paneIndex: Int) {
         DebugLogger.log("Pasting ${clipboardItems.size} items to pane $paneIndex") {
@@ -237,23 +256,6 @@ fun GlaiveScreen() {
         }
     }
 
-    fun panePath(index: Int): String = if (index == 0) currentPath else secondaryPath
-    fun setPanePath(index: Int, path: String) {
-        if (index == 0) currentPath = path else secondaryPath = path
-    }
-    fun paneSearchQuery(index: Int): String = if (index == 0) searchQuery else secondarySearchQuery
-    fun setPaneSearchQuery(index: Int, query: String) {
-        if (index == 0) searchQuery = query else secondarySearchQuery = query
-    }
-    fun paneIsSearchActive(index: Int): Boolean = if (index == 0) isSearchActive else secondaryIsSearchActive
-    fun setPaneSearchActive(index: Int, active: Boolean) {
-        if (index == 0) isSearchActive = active else secondaryIsSearchActive = active
-    }
-    fun paneCurrentTab(index: Int): Int = if (index == 0) currentTab else secondaryCurrentTab
-    fun setPaneCurrentTab(index: Int, tab: Int) {
-        if (index == 0) currentTab = tab else secondaryCurrentTab = tab
-    }
-
     // Navigation Helper
     fun navigateTo(paneIndex: Int, path: String) {
         DebugLogger.log("Navigating to $path in pane $paneIndex") {
@@ -283,7 +285,7 @@ fun GlaiveScreen() {
 
     // Load Data / Search with Debounce
     LaunchedEffect(currentPath, searchQuery, currentTab) {
-        DebugLogger.log("Loading data for path: $currentPath, query: $searchQuery, tab: $currentTab") {
+        DebugLogger.logSuspend("Loading data for path: $currentPath, query: $searchQuery, tab: $currentTab") {
             if (currentTab == 1) {
                 rawList = RecentFilesManager.getRecents(context)
             } else {
@@ -298,7 +300,7 @@ fun GlaiveScreen() {
     }
 
     LaunchedEffect(secondaryPath, secondarySearchQuery, secondaryCurrentTab) {
-        DebugLogger.log("Loading data for secondary path: $secondaryPath, query: $secondarySearchQuery, tab: $secondaryCurrentTab") {
+        DebugLogger.logSuspend("Loading data for secondary path: $secondaryPath, query: $secondarySearchQuery, tab: $secondaryCurrentTab") {
             if (secondaryCurrentTab == 1) {
                 secondaryRawList = RecentFilesManager.getRecents(context)
             } else {

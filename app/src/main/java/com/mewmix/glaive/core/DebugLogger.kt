@@ -15,4 +15,11 @@ object DebugLogger {
         log("$message: Finished")
         return result
     }
+
+    suspend fun <T> logSuspend(message: String, block: suspend () -> T): T {
+        log("$message: Starting")
+        val result = block()
+        log("$message: Finished")
+        return result
+    }
 }

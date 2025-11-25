@@ -13,7 +13,7 @@ import java.util.zip.ZipOutputStream
 object FileOperations {
 
     suspend fun zip(files: List<File>, destZip: File): Boolean = withContext(Dispatchers.IO) {
-        DebugLogger.log("Zipping ${files.size} files to ${destZip.path}") {
+        DebugLogger.logSuspend("Zipping ${files.size} files to ${destZip.path}") {
             try {
                 ZipOutputStream(BufferedOutputStream(FileOutputStream(destZip))).use { zos ->
                     files.forEach { file ->
@@ -59,7 +59,7 @@ object FileOperations {
 
 
     suspend fun copy(source: File, destDir: File): Boolean = withContext(Dispatchers.IO) {
-        DebugLogger.log("Copying ${source.path} to ${destDir.path}") {
+        DebugLogger.logSuspend("Copying ${source.path} to ${destDir.path}") {
             try {
                 if (source.isDirectory) {
                     source.copyRecursively(File(destDir, source.name), overwrite = true)
@@ -75,11 +75,11 @@ object FileOperations {
     }
 
     suspend fun move(source: File, destDir: File): Boolean = withContext(Dispatchers.IO) {
-        DebugLogger.log("Moving ${source.path} to ${destDir.path}") {
+        DebugLogger.logSuspend("Moving ${source.path} to ${destDir.path}") {
             try {
                 val destFile = File(destDir, source.name)
                 // Try atomic move first
-                if (source.renameTo(destFile)) return@log true
+                if (source.renameTo(destFile)) return@logSuspend true
 
                 // Fallback: Copy then Delete
                 if (copy(source, destDir)) {
@@ -95,7 +95,7 @@ object FileOperations {
     }
 
     suspend fun delete(target: File): Boolean = withContext(Dispatchers.IO) {
-        DebugLogger.log("Deleting ${target.path}") {
+        DebugLogger.logSuspend("Deleting ${target.path}") {
             try {
                 target.deleteRecursively()
             } catch (e: Exception) {
@@ -106,10 +106,10 @@ object FileOperations {
     }
 
     suspend fun createFile(parent: File, name: String, content: String = ""): Boolean = withContext(Dispatchers.IO) {
-        DebugLogger.log("Creating file $name in ${parent.path}") {
+        DebugLogger.logSuspend("Creating file $name in ${parent.path}") {
             try {
                 val file = File(parent, name)
-                if (file.exists()) return@log false
+                if (file.exists()) return@logSuspend false
                 file.writeText(content)
                 true
             } catch (e: Exception) {
@@ -120,10 +120,10 @@ object FileOperations {
     }
 
     suspend fun createDir(parent: File, name: String): Boolean = withContext(Dispatchers.IO) {
-        DebugLogger.log("Creating directory $name in ${parent.path}") {
+        DebugLogger.logSuspend("Creating directory $name in ${parent.path}") {
             try {
                 val dir = File(parent, name)
-                if (dir.exists()) return@log false
+                if (dir.exists()) return@logSuspend false
                 dir.mkdirs()
             } catch (e: Exception) {
                 e.printStackTrace()
