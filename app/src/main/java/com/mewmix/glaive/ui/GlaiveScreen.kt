@@ -49,6 +49,8 @@ import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -146,6 +148,23 @@ fun GlaiveScreen() {
     var maximizedPane by remember { mutableStateOf(-1) }
     
     val scope = rememberCoroutineScope()
+
+    fun handlePaste(paneIndex: Int) {
+        DebugLogger.log("Pasting ${clipboardItems.size} items to pane $paneIndex") {
+            scope.launch {
+                val targetPath = panePath(paneIndex)
+                val dest = File(targetPath)
+                clipboardItems.forEach { src ->
+                    if (isCutOperation) FileOperations.move(src, dest)
+                    else FileOperations.copy(src, dest)
+                }
+                if (isCutOperation) clipboardItems = emptyList()
+                // Refresh
+                val updated = NativeCore.list(targetPath)
+                if (paneIndex == 0) rawList = updated else secondaryRawList = updated
+            }
+        }
+    }
     
     // Derived State: Stats
     val stats by remember(rawList, secondaryRawList, selectedPaths, activePane) {
@@ -237,21 +256,23 @@ fun GlaiveScreen() {
 
     // Navigation Helper
     fun navigateTo(paneIndex: Int, path: String) {
-        val origin = panePath(paneIndex)
-        if (path != origin) {
-            pathHistory.remove(path)
-            if (origin.isNotEmpty()) {
-                pathHistory.remove(origin)
-                pathHistory.add(0, origin)
-                if (pathHistory.size > 6) {
-                    pathHistory.removeAt(pathHistory.lastIndex)
+        DebugLogger.log("Navigating to $path in pane $paneIndex") {
+            val origin = panePath(paneIndex)
+            if (path != origin) {
+                pathHistory.remove(path)
+                if (origin.isNotEmpty()) {
+                    pathHistory.remove(origin)
+                    pathHistory.add(0, origin)
+                    if (pathHistory.size > 6) {
+                        pathHistory.removeAt(pathHistory.lastIndex)
+                    }
                 }
             }
+            setPanePath(paneIndex, path)
+            setPaneSearchQuery(paneIndex, "")
+            setPaneSearchActive(paneIndex, false)
+            selectedPaths = emptySet()
         }
-        setPanePath(paneIndex, path)
-        setPaneSearchQuery(paneIndex, "")
-        setPaneSearchActive(paneIndex, false)
-        selectedPaths = emptySet()
     }
 
     fun toggleSearch(paneIndex: Int) {
@@ -262,27 +283,31 @@ fun GlaiveScreen() {
 
     // Load Data / Search with Debounce
     LaunchedEffect(currentPath, searchQuery, currentTab) {
-        if (currentTab == 1) {
-            rawList = RecentFilesManager.getRecents(context)
-        } else {
-            if (searchQuery.isEmpty()) {
-                rawList = NativeCore.list(currentPath)
+        DebugLogger.log("Loading data for path: $currentPath, query: $searchQuery, tab: $currentTab") {
+            if (currentTab == 1) {
+                rawList = RecentFilesManager.getRecents(context)
             } else {
-                delay(300)
-                rawList = NativeCore.search(currentPath, searchQuery)
+                if (searchQuery.isEmpty()) {
+                    rawList = NativeCore.list(currentPath)
+                } else {
+                    delay(300)
+                    rawList = NativeCore.search(currentPath, searchQuery)
+                }
             }
         }
     }
 
     LaunchedEffect(secondaryPath, secondarySearchQuery, secondaryCurrentTab) {
-        if (secondaryCurrentTab == 1) {
-            secondaryRawList = RecentFilesManager.getRecents(context)
-        } else {
-            if (secondarySearchQuery.isEmpty()) {
-                secondaryRawList = NativeCore.list(secondaryPath)
+        DebugLogger.log("Loading data for secondary path: $secondaryPath, query: $secondarySearchQuery, tab: $secondaryCurrentTab") {
+            if (secondaryCurrentTab == 1) {
+                secondaryRawList = RecentFilesManager.getRecents(context)
             } else {
-                delay(300)
-                secondaryRawList = NativeCore.search(secondaryPath, secondarySearchQuery)
+                if (secondarySearchQuery.isEmpty()) {
+                    secondaryRawList = NativeCore.list(secondaryPath)
+                } else {
+                    delay(300)
+                    secondaryRawList = NativeCore.search(secondaryPath, secondarySearchQuery)
+                }
             }
         }
     }
@@ -408,7 +433,9 @@ fun GlaiveScreen() {
                                 sortMode = sortMode,
                                 onItemClick = handleItemClick,
                                 onItemLongClick = handleItemLongPress,
-                                onMaximize = { maximizedPane = if (maximizedPane == 0) -1 else 0 }
+                                onMaximize = { maximizedPane = if (maximizedPane == 0) -1 else 0 },
+                                onPaste = { handlePaste(0) },
+                                clipboardActive = clipboardItems.isNotEmpty()
                             )
                         }
                         if (maximizedPane == -1) {
@@ -449,7 +476,9 @@ fun GlaiveScreen() {
                                 sortMode = sortMode,
                                 onItemClick = handleItemClick,
                                 onItemLongClick = handleItemLongPress,
-                                onMaximize = { maximizedPane = if (maximizedPane == 1) -1 else 1 }
+                                onMaximize = { maximizedPane = if (maximizedPane == 1) -1 else 1 },
+                                onPaste = { handlePaste(1) },
+                                clipboardActive = clipboardItems.isNotEmpty()
                             )
                         }
                     }
@@ -464,7 +493,9 @@ fun GlaiveScreen() {
                     sortMode = sortMode,
                     onItemClick = handleItemClick,
                     onItemLongClick = handleItemLongPress,
-                    onMaximize = {}
+                    onMaximize = {},
+                    onPaste = { handlePaste(activePane) },
+                    clipboardActive = clipboardItems.isNotEmpty()
                 )
             }
         }
@@ -497,20 +528,7 @@ fun GlaiveScreen() {
                 },
                 onClearSelection = { selectedPaths = emptySet() },
                 clipboardActive = clipboardItems.isNotEmpty(),
-                onPaste = {
-                    scope.launch {
-                        val targetPath = panePath(activePane)
-                        val dest = File(targetPath)
-                        clipboardItems.forEach { src ->
-                            if (isCutOperation) FileOperations.move(src, dest)
-                            else FileOperations.copy(src, dest)
-                        }
-                        if (isCutOperation) clipboardItems = emptyList()
-                        // Refresh
-                        val updated = NativeCore.list(targetPath)
-                        if (activePane == 0) rawList = updated else secondaryRawList = updated
-                    }
-                }
+                onPaste = { handlePaste(activePane) }
             )
         }
 
@@ -562,6 +580,24 @@ fun GlaiveScreen() {
                 onSelect = {
                     selectedPaths = selectedPaths + contextMenuTarget!!.path
                     contextMenuTarget = null
+                },
+                onZip = {
+                    scope.launch {
+                        val targetFile = File(contextMenuTarget!!.path)
+                        val zipFile = File(targetFile.parent, "${targetFile.name}.zip")
+                        if (targetFile.canonicalPath == zipFile.canonicalPath) {
+                            // Guard rail: don't zip a file into itself
+                            Toast.makeText(context, "Cannot zip a file into itself", Toast.LENGTH_SHORT).show()
+                            return@launch
+                        }
+                        FileOperations.zip(listOf(targetFile), zipFile)
+                        if (contextMenuPane == 0) {
+                            rawList = NativeCore.list(currentPath)
+                        } else {
+                            secondaryRawList = NativeCore.list(secondaryPath)
+                        }
+                        contextMenuTarget = null
+                    }
                 }
             )
         }
@@ -583,7 +619,7 @@ fun GlaiveScreen() {
                 }
             )
         }
-        
+
         // -- EDITOR --
         if (showEditor && editorFile != null) {
             TextEditor(
@@ -679,17 +715,7 @@ fun GlaiveHeader(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(
-                text = headerTitle,
-                style = TextStyle(
-                    color = SoftWhite,
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold
-                ),
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            StatsBar(stats)
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 // Shortcuts
@@ -764,15 +790,6 @@ fun GlaiveHeader(
         }
 
         Spacer(modifier = Modifier.height(8.dp))
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp),
-            horizontalArrangement = Arrangement.Center
-        ) {
-            StatsBar(stats)
-        }
     }
 }
 
@@ -828,9 +845,17 @@ fun PaneBrowser(
     sortMode: SortMode,
     onItemClick: (Int, GlaiveItem) -> Unit,
     onItemLongClick: (Int, GlaiveItem) -> Unit,
-    onMaximize: (Int) -> Unit
+    onMaximize: (Int) -> Unit,
+    onPaste: () -> Unit,
+    clipboardActive: Boolean
 ) {
-    Box(modifier = modifier) {
+    Box(modifier = modifier.pointerInput(clipboardActive) {
+        if (clipboardActive) {
+            detectTapGestures(
+                onTap = { onPaste() }
+            )
+        }
+    }) {
         if (isGridView) {
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 100.dp),
@@ -1135,12 +1160,8 @@ fun ControlDock(
             IconButton(onClick = onClearSelection) { Icon(imageVector =Icons.Default.Close, contentDescription = "Clear", tint = DangerRed) }
             IconButton(onClick = onShareSelection) { Icon(imageVector =Icons.Default.Share, contentDescription = "Share", tint = AccentBlue) }
         } else if (clipboardActive) {
-            IconButton(onClick = onPaste) { 
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 8.dp)) {
-                    Icon(imageVector =Icons.Default.Check, contentDescription = "Paste", tint = AccentGreen)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Paste", color = AccentGreen, fontWeight = FontWeight.Bold)
-                }
+            IconButton(onClick = onPaste) {
+                Icon(imageVector = Icons.Default.ContentPaste, contentDescription = "Paste", tint = AccentGreen)
             }
         } else {
             SortChip("Name", SortMode.NAME, currentSort, ascending, onSortChange)
@@ -1217,7 +1238,8 @@ fun ContextMenuSheet(
     onDelete: () -> Unit,
     onEdit: () -> Unit,
     onShare: () -> Unit,
-    onSelect: () -> Unit
+    onSelect: () -> Unit,
+    onZip: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DeepSpace) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -1226,6 +1248,7 @@ fun ContextMenuSheet(
             ContextMenuItem("Select", Icons.Default.Check, onSelect)
             ContextMenuItem("Copy", Icons.Default.Share, onCopy)
             ContextMenuItem("Cut", Icons.Default.Edit, onCut)
+            ContextMenuItem("Zip", Icons.Default.Archive, onZip)
             ContextMenuItem("Delete", Icons.Default.Delete, onDelete, DangerRed)
             if (item.type != GlaiveItem.TYPE_DIR) {
                 ContextMenuItem("Edit", Icons.Default.Edit, onEdit)
