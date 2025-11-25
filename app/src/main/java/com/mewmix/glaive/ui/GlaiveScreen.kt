@@ -22,6 +22,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
@@ -60,6 +62,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -104,42 +107,53 @@ fun GlaiveScreen() {
     // State
     var currentPath by remember { mutableStateOf("/storage/emulated/0") }
     var rawList by remember { mutableStateOf<List<GlaiveItem>>(emptyList()) }
+    var secondaryPath by remember { mutableStateOf("/storage/emulated/0") }
+    var secondaryRawList by remember { mutableStateOf<List<GlaiveItem>>(emptyList()) }
     var sortMode by remember { mutableStateOf(SortMode.NAME) }
     var sortAscending by remember { mutableStateOf(true) }
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
+    var secondarySearchQuery by remember { mutableStateOf("") }
+    var secondaryIsSearchActive by remember { mutableStateOf(false) }
     var selectedPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
     
     // New State
     var isGridView by remember { mutableStateOf(false) }
     var currentTab by remember { mutableStateOf(0) } // 0 = Browse, 1 = Recents
+    var secondaryCurrentTab by remember { mutableStateOf(0) }
+    var activePane by remember { mutableStateOf(0) }
     var clipboardItems by remember { mutableStateOf<List<File>>(emptyList()) }
     var isCutOperation by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var showEditor by remember { mutableStateOf(false) }
     var editorFile by remember { mutableStateOf<File?>(null) }
+    val pathHistory = remember { mutableStateListOf<String>() }
+    var splitScopeEnabled by remember { mutableStateOf(false) }
     
     // Filter State
     var activeFilters by remember { mutableStateOf<Set<Int>>(emptySet()) }
     
     // Context Menu State
     var contextMenuTarget by remember { mutableStateOf<GlaiveItem?>(null) }
+    var contextMenuPane by remember { mutableStateOf(0) }
     
     val scope = rememberCoroutineScope()
     
     // Derived State: Stats
-    val stats by remember(rawList, selectedPaths) {
+    val stats by remember(rawList, secondaryRawList, selectedPaths, activePane) {
         derivedStateOf {
-            val totalSize = rawList.sumOf { it.size }
-            val selectedSize = rawList.filter { selectedPaths.contains(it.path) }.sumOf { it.size }
-            val dirCount = rawList.count { it.type == GlaiveItem.TYPE_DIR }
-            val fileCount = rawList.size - dirCount
-            GlaiveStats(rawList.size, totalSize, selectedSize, dirCount, fileCount)
+            val activeList = if (activePane == 0) rawList else secondaryRawList
+            val totalSize = activeList.sumOf { it.size }
+            val selectedSize = activeList.filter { selectedPaths.contains(it.path) }.sumOf { it.size }
+            val dirCount = activeList.count { it.type == GlaiveItem.TYPE_DIR }
+            val fileCount = activeList.size - dirCount
+            GlaiveStats(activeList.size, totalSize, selectedSize, dirCount, fileCount)
         }
     }
     
     // Processed List State (Background Thread Result)
     var displayedList by remember { mutableStateOf<List<GlaiveItem>>(emptyList()) }
+    var secondaryDisplayedList by remember { mutableStateOf<List<GlaiveItem>>(emptyList()) }
 
     // Background Processing for Sorting & Filtering
     LaunchedEffect(rawList, sortMode, sortAscending, activeFilters) {
@@ -174,39 +188,117 @@ fun GlaiveScreen() {
         }
     }
 
+    LaunchedEffect(secondaryRawList, sortMode, sortAscending, activeFilters) {
+        withContext(Dispatchers.Default) {
+            var list = secondaryRawList
+            if (activeFilters.isNotEmpty()) {
+                list = list.filter { item ->
+                    item.type == GlaiveItem.TYPE_DIR || activeFilters.contains(item.type)
+                }
+            }
+            list = when (sortMode) {
+                SortMode.NAME -> list.sortedBy { it.name.lowercase() }
+                SortMode.SIZE -> list.sortedBy { it.size }
+                SortMode.DATE -> list.sortedBy { it.mtime }
+                SortMode.TYPE -> list.sortedBy { it.type }
+            }
+            if (!sortAscending) list = list.reversed()
+            list = list.sortedByDescending { it.type == GlaiveItem.TYPE_DIR }
+            withContext(Dispatchers.Main) {
+                secondaryDisplayedList = list
+            }
+        }
+    }
+
+    fun panePath(index: Int): String = if (index == 0) currentPath else secondaryPath
+    fun setPanePath(index: Int, path: String) {
+        if (index == 0) currentPath = path else secondaryPath = path
+    }
+    fun paneSearchQuery(index: Int): String = if (index == 0) searchQuery else secondarySearchQuery
+    fun setPaneSearchQuery(index: Int, query: String) {
+        if (index == 0) searchQuery = query else secondarySearchQuery = query
+    }
+    fun paneIsSearchActive(index: Int): Boolean = if (index == 0) isSearchActive else secondaryIsSearchActive
+    fun setPaneSearchActive(index: Int, active: Boolean) {
+        if (index == 0) isSearchActive = active else secondaryIsSearchActive = active
+    }
+    fun paneCurrentTab(index: Int): Int = if (index == 0) currentTab else secondaryCurrentTab
+    fun setPaneCurrentTab(index: Int, tab: Int) {
+        if (index == 0) currentTab = tab else secondaryCurrentTab = tab
+    }
+
+    // Navigation Helper
+    fun navigateTo(paneIndex: Int, path: String) {
+        val origin = panePath(paneIndex)
+        if (path != origin) {
+            pathHistory.remove(path)
+            if (origin.isNotEmpty()) {
+                pathHistory.remove(origin)
+                pathHistory.add(0, origin)
+                if (pathHistory.size > 6) {
+                    pathHistory.removeAt(pathHistory.lastIndex)
+                }
+            }
+        }
+        setPanePath(paneIndex, path)
+        setPaneSearchQuery(paneIndex, "")
+        setPaneSearchActive(paneIndex, false)
+        selectedPaths = emptySet()
+    }
+
+    fun toggleSearch(paneIndex: Int) {
+        val currentlyActive = paneIsSearchActive(paneIndex)
+        if (currentlyActive) setPaneSearchQuery(paneIndex, "")
+        setPaneSearchActive(paneIndex, !currentlyActive)
+    }
+
     // Load Data / Search with Debounce
     LaunchedEffect(currentPath, searchQuery, currentTab) {
         if (currentTab == 1) {
-            // Recent Files
             rawList = RecentFilesManager.getRecents(context)
         } else {
-            // Browse / Search
             if (searchQuery.isEmpty()) {
                 rawList = NativeCore.list(currentPath)
             } else {
-                delay(300) // Debounce 300ms
+                delay(300)
                 rawList = NativeCore.search(currentPath, searchQuery)
             }
         }
     }
 
-    // Navigation Helper
-    fun navigateTo(path: String) {
-        currentPath = path
-        searchQuery = ""
-        isSearchActive = false
-        selectedPaths = emptySet()
+    LaunchedEffect(secondaryPath, secondarySearchQuery, secondaryCurrentTab) {
+        if (secondaryCurrentTab == 1) {
+            secondaryRawList = RecentFilesManager.getRecents(context)
+        } else {
+            if (secondarySearchQuery.isEmpty()) {
+                secondaryRawList = NativeCore.list(secondaryPath)
+            } else {
+                delay(300)
+                secondaryRawList = NativeCore.search(secondaryPath, secondarySearchQuery)
+            }
+        }
     }
 
+    LaunchedEffect(splitScopeEnabled) {
+        if (!splitScopeEnabled) {
+            activePane = 0
+        } else if (pathHistory.isNotEmpty() && secondaryPath == currentPath) {
+            secondaryPath = pathHistory.first()
+        }
+    }
+
+    val activePanePath = panePath(activePane)
+    val activePaneSearch = paneIsSearchActive(activePane)
+
     // Back Handler
-    BackHandler(enabled = currentPath != "/storage/emulated/0" || isSearchActive || selectedPaths.isNotEmpty()) {
+    BackHandler(enabled = activePanePath != "/storage/emulated/0" || activePaneSearch || selectedPaths.isNotEmpty()) {
         if (selectedPaths.isNotEmpty()) {
             selectedPaths = emptySet()
-        } else if (isSearchActive) {
-            isSearchActive = false
-            searchQuery = ""
+        } else if (activePaneSearch) {
+            setPaneSearchActive(activePane, false)
+            setPaneSearchQuery(activePane, "")
         } else {
-            File(currentPath).parent?.let { navigateTo(it) }
+            File(activePanePath).parent?.let { navigateTo(activePane, it) }
         }
     }
 
@@ -215,29 +307,58 @@ fun GlaiveScreen() {
             .fillMaxSize()
             .background(DeepSpace)
     ) {
+        val handleItemClick: (Int, GlaiveItem) -> Unit = { paneIndex, item ->
+            activePane = paneIndex
+            if (selectedPaths.isNotEmpty()) {
+                selectedPaths = if (selectedPaths.contains(item.path)) {
+                    selectedPaths - item.path
+                } else {
+                    selectedPaths + item.path
+                }
+            } else if (item.type == GlaiveItem.TYPE_DIR || File(item.path).isDirectory) {
+                navigateTo(paneIndex, item.path)
+            } else {
+                RecentFilesManager.addRecent(context, item.path)
+                openFile(context, item)
+            }
+        }
+        val handleItemLongPress: (Int, GlaiveItem) -> Unit = { paneIndex, item ->
+            activePane = paneIndex
+            contextMenuPane = paneIndex
+            contextMenuTarget = item
+        }
+
         Column(modifier = Modifier.fillMaxSize()) {
             
             // -- TOP HEADER --
             GlaiveHeader(
-                currentPath = currentPath,
-                isSearchActive = isSearchActive,
-                searchQuery = searchQuery,
-                onSearchQueryChange = { searchQuery = it },
-                onToggleSearch = { 
-                    isSearchActive = !isSearchActive
-                    if (!isSearchActive) searchQuery = "" 
+                currentPath = activePanePath,
+                isSearchActive = activePaneSearch,
+                searchQuery = paneSearchQuery(activePane),
+                onSearchQueryChange = { setPaneSearchQuery(activePane, it) },
+                onToggleSearch = { toggleSearch(activePane) },
+                onPathJump = { navigateTo(activePane, it) },
+                onHomeJump = { 
+                    navigateTo(activePane, "/storage/emulated/0")
+                    setPaneCurrentTab(activePane, 0)
                 },
-                onPathJump = { navigateTo(it) },
-                onHomeJump = { navigateTo("/storage/emulated/0"); currentTab = 0 },
-                currentTab = currentTab,
-                onTabChange = { currentTab = it },
+                currentTab = paneCurrentTab(activePane),
+                onTabChange = { setPaneCurrentTab(activePane, it) },
                 isGridView = isGridView,
                 onToggleView = { isGridView = !isGridView },
-                onAddClick = { showCreateDialog = true }
+                onAddClick = { showCreateDialog = true },
+                stats = stats,
+                splitScopeEnabled = splitScopeEnabled,
+                onSplitToggle = { splitScopeEnabled = !splitScopeEnabled },
+                pathHistory = pathHistory,
+                onHistoryJump = { navigateTo(activePane, it) },
+                activePane = activePane,
+                onPaneFocus = { activePane = it },
+                secondaryPath = secondaryPath
             )
             
             // -- FILTER BAR --
-            if (!isSearchActive && currentTab == 0) {
+            if (!paneIsSearchActive(activePane) && paneCurrentTab(activePane) == 0) {
                 FilterBar(
                     activeFilters = activeFilters,
                     onFilterToggle = { type ->
@@ -251,57 +372,45 @@ fun GlaiveScreen() {
             }
 
             // -- CONTENT LIST --
-            if (isGridView) {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 100.dp),
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(bottom = 140.dp, top = 8.dp, start = 16.dp, end = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+            if (splitScopeEnabled) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(displayedList, key = { it.path }) { item ->
-                        FileGridItem(
-                            item = item,
-                            isSelected = selectedPaths.contains(item.path),
-                            onClick = {
-                                if (selectedPaths.isNotEmpty()) {
-                                    selectedPaths = if (selectedPaths.contains(item.path)) selectedPaths - item.path else selectedPaths + item.path
-                                } else if (item.type == GlaiveItem.TYPE_DIR || java.io.File(item.path).isDirectory) {
-                                    navigateTo(item.path)
-                                } else {
-                                    RecentFilesManager.addRecent(context, item.path)
-                                    openFile(context, item)
-                                }
-                            },
-                            onLongClick = { contextMenuTarget = item }
-                        )
-                    }
+                    PaneBrowser(
+                        paneIndex = 0,
+                        modifier = Modifier.weight(1f),
+                        isGridView = isGridView,
+                        displayedList = displayedList,
+                        selectedPaths = selectedPaths,
+                        sortMode = sortMode,
+                        onItemClick = handleItemClick,
+                        onItemLongClick = handleItemLongPress
+                    )
+                    PaneBrowser(
+                        paneIndex = 1,
+                        modifier = Modifier.weight(1f),
+                        isGridView = isGridView,
+                        displayedList = secondaryDisplayedList,
+                        selectedPaths = selectedPaths,
+                        sortMode = sortMode,
+                        onItemClick = handleItemClick,
+                        onItemLongClick = handleItemLongPress
+                    )
                 }
             } else {
-                LazyColumn(
+                PaneBrowser(
+                    paneIndex = activePane,
                     modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(bottom = 140.dp, top = 8.dp, start = 16.dp, end = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(displayedList, key = { it.path }) { item ->
-                        FileCard(
-                            item = item,
-                            isSelected = selectedPaths.contains(item.path),
-                            sortMode = sortMode,
-                            onClick = {
-                                if (selectedPaths.isNotEmpty()) {
-                                    selectedPaths = if (selectedPaths.contains(item.path)) selectedPaths - item.path else selectedPaths + item.path
-                                } else if (item.type == GlaiveItem.TYPE_DIR || java.io.File(item.path).isDirectory) {
-                                    navigateTo(item.path)
-                                } else {
-                                    RecentFilesManager.addRecent(context, item.path)
-                                    openFile(context, item)
-                                }
-                            },
-                            onLongClick = { contextMenuTarget = item }
-                        )
-                    }
-                }
+                    isGridView = isGridView,
+                    displayedList = if (activePane == 0) displayedList else secondaryDisplayedList,
+                    selectedPaths = selectedPaths,
+                    sortMode = sortMode,
+                    onItemClick = handleItemClick,
+                    onItemLongClick = handleItemLongPress
+                )
             }
         }
 
@@ -313,8 +422,6 @@ fun GlaiveScreen() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            StatsBar(stats)
-            
             ControlDock(
                 currentSort = sortMode,
                 ascending = sortAscending,
@@ -329,7 +436,7 @@ fun GlaiveScreen() {
                 onShareSelection = {
                     val lastPath = selectedPaths.lastOrNull()
                     if (lastPath != null) {
-                        val item = rawList.find { it.path == lastPath }
+                        val item = (rawList + secondaryRawList).find { it.path == lastPath }
                         if (item != null) sharePath(context, item)
                     }
                 },
@@ -337,18 +444,30 @@ fun GlaiveScreen() {
                 clipboardActive = clipboardItems.isNotEmpty(),
                 onPaste = {
                     scope.launch {
-                        val dest = File(currentPath)
+                        val targetPath = panePath(activePane)
+                        val dest = File(targetPath)
                         clipboardItems.forEach { src ->
                             if (isCutOperation) FileOperations.move(src, dest)
                             else FileOperations.copy(src, dest)
                         }
                         if (isCutOperation) clipboardItems = emptyList()
                         // Refresh
-                        rawList = NativeCore.list(currentPath)
+                        val updated = NativeCore.list(targetPath)
+                        if (activePane == 0) rawList = updated else secondaryRawList = updated
                     }
                 }
             )
         }
+
+        ReverseGestureHotZone(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxHeight(),
+            hasTrail = pathHistory.isNotEmpty() || File(activePanePath).parent != null,
+            onNavigateUp = {
+                File(activePanePath).parent?.let { navigateTo(activePane, it) }
+            }
+        )
         
         // -- CONTEXT MENU --
         if (contextMenuTarget != null) {
@@ -368,7 +487,11 @@ fun GlaiveScreen() {
                 onDelete = {
                     scope.launch {
                         FileOperations.delete(File(contextMenuTarget!!.path))
-                        rawList = NativeCore.list(currentPath)
+                        if (contextMenuPane == 0) {
+                            rawList = NativeCore.list(currentPath)
+                        } else {
+                            secondaryRawList = NativeCore.list(secondaryPath)
+                        }
                         contextMenuTarget = null
                     }
                 },
@@ -394,9 +517,12 @@ fun GlaiveScreen() {
                 onDismiss = { showCreateDialog = false },
                 onCreate = { name, isDir ->
                     scope.launch {
-                        if (isDir) FileOperations.createDir(File(currentPath), name)
-                        else FileOperations.createFile(File(currentPath), name)
-                        rawList = NativeCore.list(currentPath)
+                        val targetPath = panePath(activePane)
+                        val parent = File(targetPath)
+                        if (isDir) FileOperations.createDir(parent, name)
+                        else FileOperations.createFile(parent, name)
+                        val updated = NativeCore.list(targetPath)
+                        if (activePane == 0) rawList = updated else secondaryRawList = updated
                         showCreateDialog = false
                     }
                 }
@@ -444,7 +570,15 @@ fun GlaiveHeader(
     onTabChange: (Int) -> Unit,
     isGridView: Boolean,
     onToggleView: () -> Unit,
-    onAddClick: () -> Unit
+    onAddClick: () -> Unit,
+    stats: GlaiveStats,
+    splitScopeEnabled: Boolean,
+    onSplitToggle: () -> Unit,
+    pathHistory: List<String>,
+    onHistoryJump: (String) -> Unit,
+    activePane: Int,
+    onPaneFocus: (Int) -> Unit,
+    secondaryPath: String
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
@@ -511,6 +645,13 @@ fun GlaiveHeader(
                     IconButton(onClick = onToggleView, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
                         Icon(imageVector = if (isGridView) Icons.Default.List else Icons.Default.Menu, contentDescription = "View", tint = SoftWhite)
                     }
+                    IconButton(onClick = onSplitToggle, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
+                        Icon(
+                            imageVector =Icons.Default.MoreVert,
+                            contentDescription = "Split",
+                            tint = if (splitScopeEnabled) AccentGreen else SoftWhite
+                        )
+                    }
                     IconButton(onClick = onHomeJump, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
                         Icon(imageVector =Icons.Default.Home, contentDescription = "Home", tint = SoftWhite)
                     }
@@ -566,6 +707,27 @@ fun GlaiveHeader(
                 BreadcrumbStrip(currentPath, onPathJump)
             }
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            StatsBar(stats)
+        }
+
+        SplitScopePreview(
+            enabled = splitScopeEnabled,
+            primaryPath = currentPath,
+            secondaryPath = secondaryPath,
+            history = pathHistory,
+            onHistoryJump = onHistoryJump,
+            activePane = activePane,
+            onPaneFocus = onPaneFocus
+        )
     }
 }
 
@@ -605,6 +767,53 @@ fun BreadcrumbStrip(currentPath: String, onPathJump: (String) -> Unit) {
                         color = if (path == currentPath) AccentBlue else Color.Gray,
                         fontWeight = FontWeight.Medium
                     )
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun PaneBrowser(
+    paneIndex: Int,
+    modifier: Modifier = Modifier,
+    isGridView: Boolean,
+    displayedList: List<GlaiveItem>,
+    selectedPaths: Set<String>,
+    sortMode: SortMode,
+    onItemClick: (Int, GlaiveItem) -> Unit,
+    onItemLongClick: (Int, GlaiveItem) -> Unit
+) {
+    if (isGridView) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 100.dp),
+            modifier = modifier.fillMaxHeight(),
+            contentPadding = PaddingValues(bottom = 140.dp, top = 8.dp, start = 16.dp, end = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(displayedList, key = { it.path }) { item ->
+                FileGridItem(
+                    item = item,
+                    isSelected = selectedPaths.contains(item.path),
+                    onClick = { onItemClick(paneIndex, item) },
+                    onLongClick = { onItemLongClick(paneIndex, item) }
+                )
+            }
+        }
+    } else {
+        LazyColumn(
+            modifier = modifier.fillMaxHeight(),
+            contentPadding = PaddingValues(bottom = 140.dp, top = 8.dp, start = 16.dp, end = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(displayedList, key = { it.path }) { item ->
+                FileCard(
+                    item = item,
+                    isSelected = selectedPaths.contains(item.path),
+                    sortMode = sortMode,
+                    onClick = { onItemClick(paneIndex, item) },
+                    onLongClick = { onItemLongClick(paneIndex, item) }
                 )
             }
         }
@@ -743,6 +952,175 @@ fun StatItem(label: String, value: String) {
         Text(text = value, style = TextStyle(color = SoftWhite, fontWeight = FontWeight.Bold, fontSize = 12.sp))
         Spacer(modifier = Modifier.width(2.dp))
         Text(text = label, style = TextStyle(color = Color.Gray, fontSize = 10.sp))
+    }
+}
+
+@Composable
+fun SplitScopePreview(
+    enabled: Boolean,
+    primaryPath: String,
+    secondaryPath: String,
+    history: List<String>,
+    onHistoryJump: (String) -> Unit,
+    activePane: Int,
+    onPaneFocus: (Int) -> Unit
+) {
+    AnimatedVisibility(visible = enabled) {
+        val upcoming = history.firstOrNull()
+        val hasSecondaryPath = secondaryPath.isNotEmpty()
+        val secondaryDisplay = if (hasSecondaryPath) secondaryPath else upcoming ?: ""
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 12.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(SurfaceGray.copy(alpha = 0.7f))
+                .border(1.dp, AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(24.dp))
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "Split Scope",
+                style = TextStyle(color = AccentBlue, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+                SplitPaneCard(
+                    modifier = Modifier.weight(1f),
+                    title = "Pane A",
+                    path = primaryPath,
+                    accent = AccentBlue,
+                    onClick = { onPaneFocus(0) },
+                    selected = activePane == 0
+                )
+                SplitPaneCard(
+                    modifier = Modifier.weight(1f),
+                    title = "Pane B",
+                    path = secondaryDisplay.takeIf { it.isNotEmpty() },
+                    accent = AccentGreen,
+                    onClick = when {
+                        hasSecondaryPath -> { { onPaneFocus(1) } }
+                        upcoming != null -> { { onHistoryJump(upcoming) } }
+                        else -> null
+                    },
+                    selected = activePane == 1
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (history.isNotEmpty()) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(history.take(6)) { path ->
+                        HistoryChip(path = path, onClick = { onHistoryJump(path) })
+                    }
+                }
+            } else {
+                Text("No previous directories yet.", color = Color.Gray, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+fun SplitPaneCard(
+    modifier: Modifier = Modifier,
+    title: String,
+    path: String?,
+    accent: Color,
+    onClick: (() -> Unit)?,
+    selected: Boolean = false
+) {
+    val label = path?.trimEnd('/')?.substringAfterLast("/")?.ifEmpty { "Root" } ?: "—"
+    val pathLine = path ?: ""
+    val clickModifier = if (path != null && onClick != null) {
+        Modifier.clickable(onClick = onClick)
+    } else {
+        Modifier
+    }
+    val borderColor = if (selected) accent else accent.copy(alpha = 0.4f)
+    val backgroundColor = if (selected) DeepSpace.copy(alpha = 0.9f) else DeepSpace.copy(alpha = 0.7f)
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(backgroundColor)
+            .border(1.dp, borderColor, RoundedCornerShape(20.dp))
+            .then(clickModifier)
+            .padding(12.dp)
+    ) {
+        Text(title.uppercase(Locale.ROOT), color = accent, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(label, color = SoftWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(pathLine.ifEmpty { "..." }, color = Color.Gray, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+fun HistoryChip(path: String, onClick: () -> Unit) {
+    val label = path.trimEnd('/').substringAfterLast("/").ifEmpty { "Root" }
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(DeepSpace.copy(alpha = 0.8f))
+            .border(1.dp, SurfaceGray, RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(label, color = SoftWhite, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text(path, color = Color.Gray, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+fun ReverseGestureHotZone(
+    modifier: Modifier = Modifier,
+    hasTrail: Boolean,
+    onNavigateUp: () -> Unit
+) {
+    val haptic = LocalHapticFeedback.current
+    Box(
+        modifier = modifier
+            .width(28.dp)
+            .pointerInput(hasTrail) {
+                var dragDistance = 0f
+                detectHorizontalDragGestures(
+                    onHorizontalDrag = { _, dragAmount ->
+                        dragDistance += dragAmount
+                        if (dragDistance > 60f) {
+                            onNavigateUp()
+                            if (hasTrail) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            dragDistance = 0f
+                        }
+                    },
+                    onDragCancel = { dragDistance = 0f },
+                    onDragEnd = { dragDistance = 0f }
+                )
+            }
+            .alpha(if (hasTrail) 0.35f else 0.12f)
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        DeepSpace.copy(alpha = 0.6f),
+                        Color.Transparent
+                    )
+                )
+            )
+    ) {
+        if (hasTrail) {
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Icon(
+                    imageVector =Icons.Default.KeyboardArrowLeft,
+                    contentDescription = "Reverse",
+                    tint = AccentGreen
+                )
+                Text("Swipe", color = AccentGreen, fontSize = 10.sp)
+            }
+        }
     }
 }
 
