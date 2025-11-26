@@ -90,7 +90,7 @@ import com.mewmix.glaive.core.FileOperations
 import com.mewmix.glaive.core.NativeCore
 import com.mewmix.glaive.core.RecentFilesManager
 import com.mewmix.glaive.data.GlaiveItem
-import com.mewmix.glaive.ui.DiskUsageMap
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -152,7 +152,7 @@ fun GlaiveScreen() {
     var contextMenuTarget by remember { mutableStateOf<GlaiveItem?>(null) }
     var contextMenuPane by remember { mutableStateOf(0) }
     var maximizedPane by remember { mutableStateOf(-1) }
-    var showDiskUsageMap by remember { mutableStateOf(false) }
+
     val directorySizes = remember { mutableStateMapOf<String, Long>() }
     
     val scope = rememberCoroutineScope()
@@ -425,8 +425,6 @@ fun GlaiveScreen() {
                 activePane = activePane,
                 onPaneFocus = { activePane = it },
                 secondaryPath = secondaryPath,
-                showDiskUsageMap = showDiskUsageMap,
-                onToggleDiskUsageMap = { showDiskUsageMap = !showDiskUsageMap }
             )
             
             // -- FILTER BAR --
@@ -520,7 +518,9 @@ fun GlaiveScreen() {
                         }
                     }
                 }
+
             } else {
+
                 PaneBrowser(
                     paneIndex = activePane,
                     modifier = Modifier.weight(1f),
@@ -535,27 +535,6 @@ fun GlaiveScreen() {
                     clipboardActive = clipboardItems.isNotEmpty(),
                     directorySizes = directorySizes
                 )
-            } else {
-                AnimatedContent(targetState = showDiskUsageMap, label = "ViewMode") { showMap ->
-                    if (showMap) {
-                        DiskUsageMap(items = if (activePane == 0) rawList else secondaryRawList)
-                    } else {
-                        PaneBrowser(
-                            paneIndex = activePane,
-                            modifier = Modifier.weight(1f),
-                            isGridView = isGridView,
-                            displayedList = if (activePane == 0) rawList else secondaryRawList,
-                            selectedPaths = selectedPaths,
-                            sortMode = sortMode,
-                            onItemClick = handleItemClick,
-                            onItemLongClick = handleItemLongPress,
-                            onMaximize = {},
-                            onPaste = { handlePaste(activePane) },
-                            clipboardActive = clipboardItems.isNotEmpty(),
-                            directorySizes = directorySizes
-                        )
-                    }
-                }
             }
         }
 
@@ -756,8 +735,7 @@ fun GlaiveHeader(
     activePane: Int,
     onPaneFocus: (Int) -> Unit,
     secondaryPath: String,
-    showDiskUsageMap: Boolean,
-    onToggleDiskUsageMap: () -> Unit
+
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
@@ -825,13 +803,7 @@ fun GlaiveHeader(
                             tint = if (splitScopeEnabled) AccentGreen else SoftWhite
                         )
                     }
-                    IconButton(onClick = onToggleDiskUsageMap, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
-                        Icon(
-                            imageVector = Icons.Default.BubbleChart,
-                            contentDescription = "Disk Usage",
-                            tint = if (showDiskUsageMap) AccentGreen else SoftWhite
-                        )
-                    }
+
                     IconButton(onClick = onHomeJump, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
                         Icon(imageVector =Icons.Default.Home, contentDescription = "Home", tint = SoftWhite)
                     }
@@ -958,7 +930,26 @@ fun PaneBrowser(
     clipboardActive: Boolean,
     directorySizes: Map<String, Long>
 ) {
+    var showMaximizeButton by remember { mutableStateOf(true) }
+    
+    // Auto-hide maximize button
+    LaunchedEffect(showMaximizeButton) {
+        if (showMaximizeButton) {
+            delay(3000)
+            showMaximizeButton = false
+        }
+    }
+
     Box(modifier = modifier.pointerInput(clipboardActive) {
+        awaitPointerEventScope {
+            while (true) {
+                val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                if (event.changes.any { it.pressed }) {
+                    showMaximizeButton = true
+                }
+            }
+        }
+    }.pointerInput(clipboardActive) {
         if (clipboardActive) {
             detectTapGestures(
                 onTap = { onPaste() }
@@ -1000,15 +991,22 @@ fun PaneBrowser(
                 }
             }
         }
-        IconButton(
-            onClick = { onMaximize(paneIndex) },
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(8.dp)
-                .clip(CircleShape)
-                .background(SurfaceGray.copy(alpha = 0.8f))
+        
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showMaximizeButton,
+            enter = androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.fadeOut(),
+            modifier = Modifier.align(Alignment.TopEnd)
         ) {
-            Icon(imageVector = Icons.Default.AspectRatio, contentDescription = "Maximize", tint = SoftWhite)
+            IconButton(
+                onClick = { onMaximize(paneIndex) },
+                modifier = Modifier
+                    .padding(8.dp)
+                    .clip(CircleShape)
+                    .background(SurfaceGray.copy(alpha = 0.8f))
+            ) {
+                Icon(imageVector = Icons.Default.AspectRatio, contentDescription = "Maximize", tint = AccentGreen)
+            }
         }
     }
 }
