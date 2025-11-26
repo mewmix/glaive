@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.BubbleChart
 import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.List
@@ -89,6 +90,7 @@ import com.mewmix.glaive.core.FileOperations
 import com.mewmix.glaive.core.NativeCore
 import com.mewmix.glaive.core.RecentFilesManager
 import com.mewmix.glaive.data.GlaiveItem
+import com.mewmix.glaive.ui.DiskUsageMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -150,6 +152,8 @@ fun GlaiveScreen() {
     var contextMenuTarget by remember { mutableStateOf<GlaiveItem?>(null) }
     var contextMenuPane by remember { mutableStateOf(0) }
     var maximizedPane by remember { mutableStateOf(-1) }
+    var showDiskUsageMap by remember { mutableStateOf(false) }
+    val directorySizes = remember { mutableStateMapOf<String, Long>() }
     
     val scope = rememberCoroutineScope()
 
@@ -296,18 +300,39 @@ fun GlaiveScreen() {
     
     // Stats Calculation (Background)
     var stats by remember { mutableStateOf(GlaiveStats(0, 0, 0, 0, 0)) }
-    LaunchedEffect(rawList, secondaryRawList, selectedPaths, activePane) {
+    LaunchedEffect(rawList, secondaryRawList, selectedPaths, activePane, directorySizes) {
         withContext(Dispatchers.Default) {
             val activeList = if (activePane == 0) rawList else secondaryRawList
-            // Note: Iterating activeList (GlaiveLazyList) will decode items. 
-            // This is unavoidable for stats unless we add a native stats API.
-            // But doing it in background prevents UI jank.
-            val totalSize = activeList.sumOf { it.size }
-            val selectedSize = activeList.filter { selectedPaths.contains(it.path) }.sumOf { it.size }
+            val totalSize = activeList.sumOf { item ->
+                if (item.type == GlaiveItem.TYPE_DIR) {
+                    directorySizes.getOrDefault(item.path, 0L)
+                } else {
+                    item.size
+                }
+            }
+            val selectedSize = activeList.filter { selectedPaths.contains(it.path) }.sumOf { item ->
+                if (item.type == GlaiveItem.TYPE_DIR) {
+                    directorySizes.getOrDefault(item.path, 0L)
+                } else {
+                    item.size
+                }
+            }
             val dirCount = activeList.count { it.type == GlaiveItem.TYPE_DIR }
             val fileCount = activeList.size - dirCount
             withContext(Dispatchers.Main) {
                 stats = GlaiveStats(activeList.size, totalSize, selectedSize, dirCount, fileCount)
+            }
+        }
+    }
+
+    LaunchedEffect(rawList, secondaryRawList, activePane) {
+        val activeList = if (activePane == 0) rawList else secondaryRawList
+        activeList.forEach { item ->
+            if (item.type == GlaiveItem.TYPE_DIR && !directorySizes.containsKey(item.path)) {
+                scope.launch {
+                    val size = NativeCore.calculateDirectorySize(item.path)
+                    directorySizes[item.path] = size
+                }
             }
         }
     }
@@ -399,7 +424,9 @@ fun GlaiveScreen() {
                 onHistoryJump = { navigateTo(activePane, it) },
                 activePane = activePane,
                 onPaneFocus = { activePane = it },
-                secondaryPath = secondaryPath
+                secondaryPath = secondaryPath,
+                showDiskUsageMap = showDiskUsageMap,
+                onToggleDiskUsageMap = { showDiskUsageMap = !showDiskUsageMap }
             )
             
             // -- FILTER BAR --
@@ -443,7 +470,8 @@ fun GlaiveScreen() {
                                 onItemLongClick = handleItemLongPress,
                                 onMaximize = { maximizedPane = if (maximizedPane == 0) -1 else 0 },
                                 onPaste = { handlePaste(0) },
-                                clipboardActive = clipboardItems.isNotEmpty()
+                                clipboardActive = clipboardItems.isNotEmpty(),
+                                directorySizes = directorySizes
                             )
                         }
                         if (maximizedPane == -1) {
@@ -486,7 +514,8 @@ fun GlaiveScreen() {
                                 onItemLongClick = handleItemLongPress,
                                 onMaximize = { maximizedPane = if (maximizedPane == 1) -1 else 1 },
                                 onPaste = { handlePaste(1) },
-                                clipboardActive = clipboardItems.isNotEmpty()
+                                clipboardActive = clipboardItems.isNotEmpty(),
+                                directorySizes = directorySizes
                             )
                         }
                     }
@@ -503,8 +532,30 @@ fun GlaiveScreen() {
                     onItemLongClick = handleItemLongPress,
                     onMaximize = {},
                     onPaste = { handlePaste(activePane) },
-                    clipboardActive = clipboardItems.isNotEmpty()
+                    clipboardActive = clipboardItems.isNotEmpty(),
+                    directorySizes = directorySizes
                 )
+            } else {
+                AnimatedContent(targetState = showDiskUsageMap, label = "ViewMode") { showMap ->
+                    if (showMap) {
+                        DiskUsageMap(items = if (activePane == 0) rawList else secondaryRawList)
+                    } else {
+                        PaneBrowser(
+                            paneIndex = activePane,
+                            modifier = Modifier.weight(1f),
+                            isGridView = isGridView,
+                            displayedList = if (activePane == 0) rawList else secondaryRawList,
+                            selectedPaths = selectedPaths,
+                            sortMode = sortMode,
+                            onItemClick = handleItemClick,
+                            onItemLongClick = handleItemLongPress,
+                            onMaximize = {},
+                            onPaste = { handlePaste(activePane) },
+                            clipboardActive = clipboardItems.isNotEmpty(),
+                            directorySizes = directorySizes
+                        )
+                    }
+                }
             }
         }
 
@@ -704,7 +755,9 @@ fun GlaiveHeader(
     onHistoryJump: (String) -> Unit,
     activePane: Int,
     onPaneFocus: (Int) -> Unit,
-    secondaryPath: String
+    secondaryPath: String,
+    showDiskUsageMap: Boolean,
+    onToggleDiskUsageMap: () -> Unit
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
@@ -770,6 +823,13 @@ fun GlaiveHeader(
                             imageVector =Icons.Default.CallSplit,
                             contentDescription = "Split",
                             tint = if (splitScopeEnabled) AccentGreen else SoftWhite
+                        )
+                    }
+                    IconButton(onClick = onToggleDiskUsageMap, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
+                        Icon(
+                            imageVector = Icons.Default.BubbleChart,
+                            contentDescription = "Disk Usage",
+                            tint = if (showDiskUsageMap) AccentGreen else SoftWhite
                         )
                     }
                     IconButton(onClick = onHomeJump, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
@@ -895,7 +955,8 @@ fun PaneBrowser(
     onItemLongClick: (Int, GlaiveItem) -> Unit,
     onMaximize: (Int) -> Unit,
     onPaste: () -> Unit,
-    clipboardActive: Boolean
+    clipboardActive: Boolean,
+    directorySizes: Map<String, Long>
 ) {
     Box(modifier = modifier.pointerInput(clipboardActive) {
         if (clipboardActive) {
@@ -933,7 +994,8 @@ fun PaneBrowser(
                         isSelected = selectedPaths.contains(item.path),
                         sortMode = sortMode,
                         onClick = { onItemClick(paneIndex, item) },
-                        onLongClick = { onItemLongClick(paneIndex, item) }
+                        onLongClick = { onItemLongClick(paneIndex, item) },
+                        directorySize = directorySizes[item.path]
                     )
                 }
             }
@@ -958,7 +1020,8 @@ fun FileCard(
     isSelected: Boolean,
     sortMode: SortMode,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    directorySize: Long?
 ) {
     val haptic = LocalHapticFeedback.current
 
@@ -1020,7 +1083,13 @@ fun FileCard(
             )
             
             val infoText = when {
-                item.type == GlaiveItem.TYPE_DIR -> "Folder"
+                item.type == GlaiveItem.TYPE_DIR -> {
+                    if (directorySize != null) {
+                        formatSize(directorySize)
+                    } else {
+                        "Calculating..."
+                    }
+                }
                 sortMode == SortMode.DATE -> formatDate(item.mtime)
                 sortMode == SortMode.SIZE -> formatSize(item.size)
                 else -> formatSize(item.size)
