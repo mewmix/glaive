@@ -140,6 +140,8 @@ fun GlaiveScreen() {
     var splitFraction by remember { mutableStateOf(0.5f) }
     val minSplitFraction = 0.3f
     val maxSplitFraction = 0.7f
+    var navigationPaneVisible by remember { mutableStateOf(false) }
+    var navigationPanePulse by remember { mutableStateOf(0) }
     
     // Filter State
     var activeFilters by remember { mutableStateOf<Set<Int>>(emptySet()) }
@@ -166,6 +168,21 @@ fun GlaiveScreen() {
     fun paneCurrentTab(index: Int): Int = if (index == 0) currentTab else secondaryCurrentTab
     fun setPaneCurrentTab(index: Int, tab: Int) {
         if (index == 0) currentTab = tab else secondaryCurrentTab = tab
+    }
+
+    fun showNavigationPane() {
+        contextMenuTarget = null
+        if (navigationPaneVisible) {
+            navigationPanePulse++
+        } else {
+            navigationPaneVisible = true
+        }
+    }
+
+    fun keepNavigationPaneAlive() {
+        if (navigationPaneVisible) {
+            navigationPanePulse++
+        }
     }
 
     fun handlePaste(paneIndex: Int) {
@@ -303,6 +320,13 @@ fun GlaiveScreen() {
         }
     }
 
+    LaunchedEffect(navigationPaneVisible, navigationPanePulse) {
+        if (navigationPaneVisible) {
+            delay(4200)
+            navigationPaneVisible = false
+        }
+    }
+
     val activePanePath = panePath(activePane)
     val activePaneSearch = paneIsSearchActive(activePane)
 
@@ -370,6 +394,7 @@ fun GlaiveScreen() {
                 stats = stats,
                 splitScopeEnabled = splitScopeEnabled,
                 onSplitToggle = { splitScopeEnabled = !splitScopeEnabled },
+                onShowNavigationPane = { showNavigationPane() },
                 pathHistory = pathHistory,
                 onHistoryJump = { navigateTo(activePane, it) },
                 activePane = activePane,
@@ -524,6 +549,32 @@ fun GlaiveScreen() {
                 File(activePanePath).parent?.let { navigateTo(activePane, it) }
             }
         )
+
+        AnimatedVisibility(
+            visible = navigationPaneVisible,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 }),
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            NavigationPaneOverlay(
+                activePane = activePane,
+                splitScopeEnabled = splitScopeEnabled,
+                currentPath = currentPath,
+                secondaryPath = secondaryPath,
+                pathHistory = pathHistory,
+                onPaneFocus = { paneIndex ->
+                    activePane = paneIndex
+                    keepNavigationPaneAlive()
+                },
+                onPathSelected = { paneIndex, path ->
+                    activePane = paneIndex
+                    navigateTo(paneIndex, path)
+                    navigationPaneVisible = false
+                },
+                onDismiss = { navigationPaneVisible = false },
+                onInteract = { keepNavigationPaneAlive() }
+            )
+        }
         
         // -- CONTEXT MENU --
         if (contextMenuTarget != null) {
@@ -648,6 +699,7 @@ fun GlaiveHeader(
     stats: GlaiveStats,
     splitScopeEnabled: Boolean,
     onSplitToggle: () -> Unit,
+    onShowNavigationPane: () -> Unit,
     pathHistory: List<String>,
     onHistoryJump: (String) -> Unit,
     activePane: Int,
@@ -723,6 +775,15 @@ fun GlaiveHeader(
                     IconButton(onClick = onHomeJump, modifier = Modifier.clip(CircleShape).background(SurfaceGray)) {
                         Icon(imageVector =Icons.Default.Home, contentDescription = "Home", tint = SoftWhite)
                     }
+                }
+
+                IconButton(
+                    onClick = onShowNavigationPane,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(SurfaceGray)
+                ) {
+                    Icon(imageVector = Icons.Default.KeyboardArrowRight, contentDescription = "Navigation Pane", tint = AccentBlue)
                 }
 
                 IconButton(
@@ -1022,6 +1083,147 @@ fun StatItem(label: String, value: String) {
     }
 }
 
+@Composable
+fun NavigationPaneOverlay(
+    activePane: Int,
+    splitScopeEnabled: Boolean,
+    currentPath: String,
+    secondaryPath: String,
+    pathHistory: List<String>,
+    onPaneFocus: (Int) -> Unit,
+    onPathSelected: (Int, String) -> Unit,
+    onDismiss: () -> Unit,
+    onInteract: () -> Unit
+) {
+    val quickTargets = remember {
+        listOf(
+            "Internal" to "/storage/emulated/0",
+            "Downloads" to "/storage/emulated/0/Download",
+            "DCIM" to "/storage/emulated/0/DCIM",
+            "Movies" to "/storage/emulated/0/Movies",
+            "Documents" to "/storage/emulated/0/Documents"
+        )
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.92f))
+    ) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Navigation Pane",
+                    style = TextStyle(color = SoftWhite, fontWeight = FontWeight.Bold, fontSize = 20.sp),
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(SurfaceGray)
+                ) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = SoftWhite)
+                }
+            }
+
+            Text(
+                text = "Focus a pane, then pick a target. Pane closes automatically after a short delay.",
+                style = TextStyle(color = Color.Gray, fontSize = 12.sp)
+            )
+
+            if (splitScopeEnabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    SplitPaneCard(
+                        modifier = Modifier.weight(1f),
+                        title = "PANE A",
+                        path = currentPath,
+                        accent = AccentBlue,
+                        onClick = {
+                            onInteract()
+                            onPaneFocus(0)
+                        },
+                        selected = activePane == 0
+                    )
+                    SplitPaneCard(
+                        modifier = Modifier.weight(1f),
+                        title = "PANE B",
+                        path = secondaryPath,
+                        accent = AccentPurple,
+                        onClick = {
+                            onInteract()
+                            onPaneFocus(1)
+                        },
+                        selected = activePane == 1
+                    )
+                }
+            } else {
+                SplitPaneCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    title = "ACTIVE PANE",
+                    path = currentPath,
+                    accent = AccentBlue,
+                    onClick = {
+                        onInteract()
+                        onPaneFocus(0)
+                    },
+                    selected = true
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Quick Roots",
+                    style = TextStyle(color = AccentBlue, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(quickTargets) { (label, path) ->
+                        HistoryChip(
+                            path = path,
+                            label = label,
+                            onClick = {
+                                onInteract()
+                                onPathSelected(activePane, path)
+                            }
+                        )
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "History",
+                    style = TextStyle(color = AccentGreen, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                )
+                if (pathHistory.isEmpty()) {
+                    Text("No history yet.", color = Color.Gray, fontSize = 12.sp)
+                } else {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(pathHistory) { path ->
+                            HistoryChip(
+                                path = path,
+                                onClick = {
+                                    onInteract()
+                                    onPathSelected(activePane, path)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 @Composable
 fun SplitPaneCard(
@@ -1058,8 +1260,8 @@ fun SplitPaneCard(
 }
 
 @Composable
-fun HistoryChip(path: String, onClick: () -> Unit) {
-    val label = path.trimEnd('/').substringAfterLast("/").ifEmpty { "Root" }
+fun HistoryChip(path: String, label: String? = null, onClick: () -> Unit) {
+    val resolvedLabel = label ?: path.trimEnd('/').substringAfterLast("/").ifEmpty { "Root" }
     Column(
         modifier = Modifier
             .clip(RoundedCornerShape(16.dp))
@@ -1068,7 +1270,7 @@ fun HistoryChip(path: String, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Text(label, color = SoftWhite, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text(resolvedLabel, color = SoftWhite, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         Text(path, color = Color.Gray, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
