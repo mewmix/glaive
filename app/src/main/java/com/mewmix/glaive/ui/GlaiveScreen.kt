@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -90,7 +91,7 @@ import coil.compose.AsyncImage
 import com.mewmix.glaive.core.DebugLogger
 import com.mewmix.glaive.core.FileOperations
 import com.mewmix.glaive.core.NativeCore
-import com.mewmix.glaive.core.RecentFilesManager
+import com.mewmix.glaive.core.FavoritesManager
 import com.mewmix.glaive.data.GlaiveItem
 
 import kotlinx.coroutines.Dispatchers
@@ -116,14 +117,16 @@ val AccentGreen = NeonGreen
 
 enum class SortMode { NAME, DATE, SIZE, TYPE }
 
+const val ROOT_PATH = "/storage/emulated/0"
+
 @Composable
 fun GlaiveScreen() {
     val context = LocalContext.current
     
     // State
-    var currentPath by remember { mutableStateOf("/storage/emulated/0") }
+    var currentPath by remember { mutableStateOf(ROOT_PATH) }
     var rawList by remember { mutableStateOf<List<GlaiveItem>>(emptyList()) }
-    var secondaryPath by remember { mutableStateOf("/storage/emulated/0") }
+    var secondaryPath by remember { mutableStateOf(ROOT_PATH) }
     var secondaryRawList by remember { mutableStateOf<List<GlaiveItem>>(emptyList()) }
     var sortMode by remember { mutableStateOf(SortMode.NAME) }
     var sortAscending by remember { mutableStateOf(true) }
@@ -158,6 +161,7 @@ fun GlaiveScreen() {
     var contextMenuTarget by remember { mutableStateOf<GlaiveItem?>(null) }
     var contextMenuPane by remember { mutableStateOf(0) }
     var maximizedPane by remember { mutableStateOf(-1) }
+    var showMultiSelectionMenu by remember { mutableStateOf(false) }
 
     val directorySizes = remember { mutableStateMapOf<String, Long>() }
     
@@ -187,9 +191,23 @@ fun GlaiveScreen() {
     }
 
     fun handlePaste(paneIndex: Int) {
-        DebugLogger.log("Pasting ${clipboardItems.size} items to pane $paneIndex") {
-            scope.launch {
-                val targetPath = panePath(paneIndex)
+    DebugLogger.log("Pasting ${clipboardItems.size} items to pane $paneIndex") {
+        scope.launch {
+            val targetPath = panePath(paneIndex)
+            if (targetPath.contains(".zip")) {
+                val zipPath = targetPath.substringBefore(".zip") + ".zip"
+                val internalPath = targetPath.substringAfter(".zip", "")
+                val cleanInternal = if (internalPath.startsWith("/")) internalPath.substring(1) else internalPath
+                
+                FileOperations.addToZip(File(zipPath), clipboardItems, cleanInternal)
+                
+                // Refresh
+                if (paneIndex == 0) {
+                    rawList = FileOperations.listZip(zipPath, cleanInternal)
+                } else {
+                    secondaryRawList = FileOperations.listZip(zipPath, cleanInternal)
+                }
+            } else {
                 val dest = File(targetPath)
                 clipboardItems.forEach { src ->
                     if (isCutOperation) FileOperations.move(src, dest)
@@ -202,6 +220,7 @@ fun GlaiveScreen() {
             }
         }
     }
+}
     
     fun getFilterMask(filters: Set<Int>): Int {
         var mask = 0
@@ -221,6 +240,8 @@ fun GlaiveScreen() {
     // Navigation Helper
     fun navigateTo(paneIndex: Int, path: String) {
         DebugLogger.log("Navigating to $path in pane $paneIndex") {
+            if (!path.startsWith(ROOT_PATH)) return@log
+
             val origin = panePath(paneIndex)
             if (path != origin) {
                 pathHistory.remove(path)
@@ -249,7 +270,7 @@ fun GlaiveScreen() {
     LaunchedEffect(currentPath, searchQuery, currentTab, sortMode, sortAscending, activeFilters) {
         DebugLogger.logSuspend("Loading data for path: $currentPath") {
             if (currentTab == 1) {
-                rawList = RecentFilesManager.getRecents(context)
+                rawList = FavoritesManager.getFavorites(context)
             } else {
                 if (searchQuery.isEmpty()) {
                     rawList = NativeCore.list(
@@ -259,8 +280,15 @@ fun GlaiveScreen() {
                         getFilterMask(activeFilters)
                     )
                 } else {
-                    delay(300)
-                    rawList = NativeCore.search(currentPath, searchQuery, getFilterMask(activeFilters))
+                    if (currentPath.contains(".zip")) {
+                        val zipPath = currentPath.substringBefore(".zip") + ".zip"
+                        val internalPath = currentPath.substringAfter(".zip", "")
+                        if (internalPath.startsWith("/")) internalPath.substring(1) else internalPath
+                        rawList = FileOperations.listZip(zipPath, internalPath)
+                    } else {
+                        delay(300)
+                        rawList = NativeCore.search(currentPath, searchQuery, getFilterMask(activeFilters))
+                    }
                 }
             }
         }
@@ -270,7 +298,7 @@ fun GlaiveScreen() {
         if (!splitScopeEnabled) return@LaunchedEffect
         DebugLogger.logSuspend("Loading data for secondary path: $secondaryPath") {
             if (secondaryCurrentTab == 1) {
-                secondaryRawList = RecentFilesManager.getRecents(context)
+                secondaryRawList = FavoritesManager.getFavorites(context)
             } else {
                 if (secondarySearchQuery.isEmpty()) {
                     secondaryRawList = NativeCore.list(
@@ -280,8 +308,15 @@ fun GlaiveScreen() {
                         getFilterMask(activeFilters)
                     )
                 } else {
-                    delay(300)
-                    secondaryRawList = NativeCore.search(secondaryPath, secondarySearchQuery, getFilterMask(activeFilters))
+                    if (secondaryPath.contains(".zip")) {
+                        val zipPath = secondaryPath.substringBefore(".zip") + ".zip"
+                        val internalPath = secondaryPath.substringAfter(".zip", "")
+                        val cleanInternal = if (internalPath.startsWith("/")) internalPath.substring(1) else internalPath
+                        secondaryRawList = FileOperations.listZip(zipPath, cleanInternal)
+                    } else {
+                        delay(300)
+                        secondaryRawList = NativeCore.search(secondaryPath, secondarySearchQuery, getFilterMask(activeFilters))
+                    }
                 }
             }
         }
@@ -344,17 +379,27 @@ fun GlaiveScreen() {
     val activePanePath = panePath(activePane)
     val activePaneSearch = paneIsSearchActive(activePane)
 
-    BackHandler(enabled = (activePanePath != "/storage/emulated/0" || activePaneSearch || selectedPaths.isNotEmpty()) || (splitScopeEnabled && secondaryPath != "/storage/emulated/0")) {
+    BackHandler(enabled = (activePanePath != ROOT_PATH || activePaneSearch || selectedPaths.isNotEmpty()) || (splitScopeEnabled && secondaryPath != ROOT_PATH)) {
         if (selectedPaths.isNotEmpty()) {
             selectedPaths = emptySet()
         } else if (activePaneSearch) {
             setPaneSearchActive(activePane, false)
             setPaneSearchQuery(activePane, "")
         } else {
-            if (splitScopeEnabled && activePane == 1 && secondaryPath != "/storage/emulated/0") {
-                File(secondaryPath).parent?.let { navigateTo(1, it) }
-            } else {
-                File(activePanePath).parent?.let { navigateTo(activePane, it) }
+            if (splitScopeEnabled && activePane == 1 && secondaryPath != ROOT_PATH) {
+                File(secondaryPath).parent?.let { 
+                    if (it.startsWith(ROOT_PATH)) navigateTo(1, it) 
+                }
+            } else if (activePanePath != ROOT_PATH) {
+                if (activePanePath.contains(".zip") && !activePanePath.endsWith(".zip")) {
+                     // Inside zip, go up
+                     val parent = activePanePath.substringBeforeLast("/")
+                     navigateTo(activePane, parent)
+                } else {
+                    File(activePanePath).parent?.let { 
+                        if (it.startsWith(ROOT_PATH)) navigateTo(activePane, it) 
+                    }
+                }
             }
         }
     }
@@ -372,10 +417,9 @@ fun GlaiveScreen() {
                 } else {
                     selectedPaths + item.path
                 }
-            } else if (item.type == GlaiveItem.TYPE_DIR || File(item.path).isDirectory) {
+            } else if (item.type == GlaiveItem.TYPE_DIR || File(item.path).isDirectory || item.path.endsWith(".zip")) {
                 navigateTo(paneIndex, item.path)
             } else {
-                RecentFilesManager.addRecent(context, item.path)
                 openFile(context, item)
             }
         }
@@ -403,6 +447,7 @@ fun GlaiveScreen() {
                 stats = stats,
                 splitScopeEnabled = splitScopeEnabled,
                 onSplitToggle = { splitScopeEnabled = !splitScopeEnabled },
+                onHomeClick = { navigateTo(activePane, ROOT_PATH) }
             )
             
             // -- FILTER BAR --
@@ -447,7 +492,8 @@ fun GlaiveScreen() {
                                 onMaximize = { maximizedPane = if (maximizedPane == 0) -1 else 0 },
                                 onPaste = { handlePaste(0) },
                                 clipboardActive = clipboardItems.isNotEmpty(),
-                                directorySizes = directorySizes
+                                directorySizes = directorySizes,
+                                canMaximize = splitScopeEnabled && maximizedPane == -1
                             )
                         }
                         if (maximizedPane == -1) {
@@ -491,7 +537,8 @@ fun GlaiveScreen() {
                                 onMaximize = { maximizedPane = if (maximizedPane == 1) -1 else 1 },
                                 onPaste = { handlePaste(1) },
                                 clipboardActive = clipboardItems.isNotEmpty(),
-                                directorySizes = directorySizes
+                                directorySizes = directorySizes,
+                                canMaximize = splitScopeEnabled && maximizedPane == -1
                             )
                         }
                     }
@@ -511,7 +558,8 @@ fun GlaiveScreen() {
                     onMaximize = {},
                     onPaste = { handlePaste(activePane) },
                     clipboardActive = clipboardItems.isNotEmpty(),
-                    directorySizes = directorySizes
+                    directorySizes = directorySizes,
+                    canMaximize = false
                 )
             }
         }
@@ -543,6 +591,7 @@ fun GlaiveScreen() {
                     }
                 },
                 onClearSelection = { selectedPaths = emptySet() },
+                onMoreSelection = { showMultiSelectionMenu = true },
                 clipboardActive = clipboardItems.isNotEmpty(),
                 onPaste = { handlePaste(activePane) }
             )
@@ -552,9 +601,12 @@ fun GlaiveScreen() {
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .fillMaxHeight(),
-            hasTrail = pathHistory.isNotEmpty() || File(activePanePath).parent != null,
+            hasTrail = (pathHistory.isNotEmpty() || (File(activePanePath).parent?.startsWith(ROOT_PATH) == true && activePanePath != ROOT_PATH)),
             onNavigateUp = {
-                File(activePanePath).parent?.let { navigateTo(activePane, it) }
+                val parent = File(activePanePath).parent
+                if (parent != null && parent.startsWith(ROOT_PATH) && activePanePath != ROOT_PATH) {
+                    navigateTo(activePane, parent)
+                }
             }
         )
 
@@ -601,11 +653,28 @@ fun GlaiveScreen() {
                 },
                 onDelete = {
                     scope.launch {
-                        FileOperations.delete(File(contextMenuTarget!!.path))
-                        if (contextMenuPane == 0) {
-                            rawList = NativeCore.list(currentPath)
+                        val path = contextMenuTarget!!.path
+                        if (path.contains(".zip")) {
+                            val zipPath = path.substringBefore(".zip") + ".zip"
+                            val internalPath = path.substringAfter(".zip", "")
+                            val cleanInternal = if (internalPath.startsWith("/")) internalPath.substring(1) else internalPath
+                            
+                            FileOperations.removeFromZip(File(zipPath), listOf(cleanInternal))
+                            
+                            // Refresh
+                            val parentInternal = cleanInternal.substringBeforeLast("/", "")
+                            if (contextMenuPane == 0) {
+                                rawList = FileOperations.listZip(zipPath, parentInternal)
+                            } else {
+                                secondaryRawList = FileOperations.listZip(zipPath, parentInternal)
+                            }
                         } else {
-                            secondaryRawList = NativeCore.list(secondaryPath)
+                            FileOperations.delete(File(path))
+                            if (contextMenuPane == 0) {
+                                rawList = NativeCore.list(currentPath)
+                            } else {
+                                secondaryRawList = NativeCore.list(secondaryPath)
+                            }
                         }
                         contextMenuTarget = null
                     }
@@ -639,6 +708,101 @@ fun GlaiveScreen() {
                         }
                         contextMenuTarget = null
                     }
+                },
+                isFavorite = FavoritesManager.isFavorite(context, contextMenuTarget!!.path),
+                onFavorite = { shouldAdd ->
+                    if (shouldAdd) FavoritesManager.addFavorite(context, contextMenuTarget!!.path)
+                    else FavoritesManager.removeFavorite(context, contextMenuTarget!!.path)
+                    
+                    // Refresh if in Favorites tab
+                    if (paneCurrentTab(activePane) == 1) {
+                         if (activePane == 0) rawList = FavoritesManager.getFavorites(context)
+                         else secondaryRawList = FavoritesManager.getFavorites(context)
+                    }
+                    contextMenuTarget = null
+                },
+                onUnzip = {
+                    scope.launch {
+                        val targetFile = File(contextMenuTarget!!.path)
+                        val destDir = targetFile.parentFile ?: targetFile
+                        FileOperations.unzip(targetFile, destDir)
+                        val updated = NativeCore.list(panePath(activePane))
+                        if (activePane == 0) rawList = updated else secondaryRawList = updated
+                        contextMenuTarget = null
+                    }
+                }
+            )
+        }
+        
+        // -- MULTI SELECTION MENU --
+        if (showMultiSelectionMenu) {
+            MultiSelectionMenuSheet(
+                count = selectedPaths.size,
+                onDismiss = { showMultiSelectionMenu = false },
+                onCopy = {
+                    clipboardItems = selectedPaths.map { File(it) }
+                    isCutOperation = false
+                    selectedPaths = emptySet()
+                    showMultiSelectionMenu = false
+                },
+                onCut = {
+                    clipboardItems = selectedPaths.map { File(it) }
+                    isCutOperation = true
+                    selectedPaths = emptySet()
+                    showMultiSelectionMenu = false
+                },
+                onDelete = {
+                    scope.launch {
+                        val firstPath = selectedPaths.firstOrNull()
+                        if (firstPath != null && firstPath.contains(".zip")) {
+                             val zipPath = firstPath.substringBefore(".zip") + ".zip"
+                             val internalPaths = selectedPaths.map { 
+                                 val ip = it.substringAfter(".zip", "")
+                                 if (ip.startsWith("/")) ip.substring(1) else ip
+                             }
+                             
+                             FileOperations.removeFromZip(File(zipPath), internalPaths)
+                             
+                             // Refresh
+                             val firstInternal = internalPaths.first()
+                             val parentInternal = firstInternal.substringBeforeLast("/", "")
+                             if (activePane == 0) {
+                                 rawList = FileOperations.listZip(zipPath, parentInternal)
+                             } else {
+                                 secondaryRawList = FileOperations.listZip(zipPath, parentInternal)
+                             }
+                        } else {
+                            selectedPaths.forEach { FileOperations.delete(File(it)) }
+                            val updated = NativeCore.list(panePath(activePane))
+                            if (activePane == 0) rawList = updated else secondaryRawList = updated
+                        }
+                        selectedPaths = emptySet()
+                        showMultiSelectionMenu = false
+                    }
+                },
+                onZip = {
+                    scope.launch {
+                        val files = selectedPaths.map { File(it) }
+                        if (files.isNotEmpty()) {
+                            val parent = files.first().parentFile
+                            val zipName = if (files.size == 1) "${files.first().name}.zip" else "archive_${System.currentTimeMillis()}.zip"
+                            val zipFile = File(parent, zipName)
+                            FileOperations.zip(files, zipFile)
+                            val updated = NativeCore.list(panePath(activePane))
+                            if (activePane == 0) rawList = updated else secondaryRawList = updated
+                        }
+                        selectedPaths = emptySet()
+                        showMultiSelectionMenu = false
+                    }
+                },
+                onCopyPath = {
+                    val text = selectedPaths.joinToString("\n")
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    val clip = android.content.ClipData.newPlainText("Paths", text)
+                    clipboard.setPrimaryClip(clip)
+                    Toast.makeText(context, "Paths copied to clipboard", Toast.LENGTH_SHORT).show()
+                    selectedPaths = emptySet()
+                    showMultiSelectionMenu = false
                 }
             )
         }
@@ -705,6 +869,7 @@ fun GlaiveHeader(
     stats: GlaiveStats,
     splitScopeEnabled: Boolean,
     onSplitToggle: () -> Unit,
+    onHomeClick: () -> Unit
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
@@ -749,13 +914,13 @@ fun GlaiveHeader(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 TabItem("BROWSE", currentTab == 0) { onTabChange(0) }
-                TabItem("RECENTS", currentTab == 1) { onTabChange(1) }
+                TabItem("FAVORITES", currentTab == 1) { onTabChange(1) }
             }
 
             // Minimal Stats
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "${stats.fileCount}F · ${stats.dirCount}D ",
+                    text = "${stats.fileCount} Files · ${stats.dirCount} Folders ",
                     style = TextStyle(color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Medium)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
@@ -813,6 +978,7 @@ fun GlaiveHeader(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 MinimalIcon(Icons.Default.Add, onAddClick)
+                                MinimalIcon(Icons.Default.Home, onHomeClick)
                                 MinimalIcon(if (isGridView) Icons.Default.ViewList else Icons.Default.GridView, onToggleView)
                                 MinimalIcon(Icons.Default.CallSplit, onSplitToggle, if (splitScopeEnabled) NeonGreen else Color.Gray)
                                 MinimalIcon(Icons.Default.Search, onToggleSearch)
@@ -901,7 +1067,7 @@ fun BreadcrumbStrip(currentPath: String, onPathJump: (String) -> Unit) {
             acc += "/$segment"
             if (hidden.contains(segment)) return@forEach
             val label = when (segment) {
-                "0" -> "INT"
+                "0" -> "/"
                 else -> segment
             }
             list.add(label to acc)
@@ -951,7 +1117,8 @@ fun PaneBrowser(
     onMaximize: (Int) -> Unit,
     onPaste: () -> Unit,
     clipboardActive: Boolean,
-    directorySizes: Map<String, Long>
+    directorySizes: Map<String, Long>,
+    canMaximize: Boolean = false
 ) {
     var showMaximizeButton by remember { mutableStateOf(true) }
     
@@ -1015,7 +1182,7 @@ fun PaneBrowser(
         }
         
         androidx.compose.animation.AnimatedVisibility(
-            visible = showMaximizeButton,
+            visible = showMaximizeButton && canMaximize,
             enter = androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.fadeOut(),
             modifier = Modifier.align(Alignment.TopEnd)
@@ -1131,7 +1298,7 @@ fun NavigationPaneOverlay(
 ) {
     val quickTargets = remember {
         listOf(
-            "INT" to "/storage/emulated/0",
+            "/" to "/storage/emulated/0",
             "DL" to "/storage/emulated/0/Download",
             "DCIM" to "/storage/emulated/0/DCIM",
             "MOV" to "/storage/emulated/0/Movies",
@@ -1352,6 +1519,7 @@ fun ControlDock(
     selectionActive: Boolean,
     onShareSelection: () -> Unit,
     onClearSelection: () -> Unit,
+    onMoreSelection: () -> Unit,
     clipboardActive: Boolean,
     onPaste: () -> Unit
 ) {
@@ -1366,6 +1534,7 @@ fun ControlDock(
         if (selectionActive) {
             IconButton(onClick = onClearSelection) { Icon(imageVector =Icons.Default.Close, contentDescription = "Clear", tint = DangerRed) }
             IconButton(onClick = onShareSelection) { Icon(imageVector =Icons.Default.Share, contentDescription = "Share", tint = NeonGreen) }
+            IconButton(onClick = onMoreSelection) { Icon(imageVector = Icons.Default.MoreVert, contentDescription = "More", tint = SoftWhite) }
         } else if (clipboardActive) {
             IconButton(onClick = onPaste) {
                 Icon(imageVector = Icons.Default.ContentPaste, contentDescription = "Paste", tint = NeonGreen)
@@ -1433,16 +1602,30 @@ fun ContextMenuSheet(
     onEdit: () -> Unit,
     onShare: () -> Unit,
     onSelect: () -> Unit,
-    onZip: () -> Unit
+    onZip: () -> Unit,
+    onUnzip: () -> Unit,
+    onFavorite: (Boolean) -> Unit,
+    isFavorite: Boolean
 ) {
+    val context = LocalContext.current
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DeepSpace) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(item.name, style = MaterialTheme.typography.titleLarge, color = SoftWhite)
             Spacer(modifier = Modifier.height(16.dp))
+            ContextMenuItem(if (isFavorite) "Remove from Favorites" else "Add to Favorites", Icons.Default.Check, { onFavorite(!isFavorite) })
             ContextMenuItem("Select", Icons.Default.Check, onSelect)
             ContextMenuItem("Copy", Icons.Default.Share, onCopy)
             ContextMenuItem("Cut", Icons.Default.Edit, onCut)
             ContextMenuItem("Zip", Icons.Default.Archive, onZip)
+            if (item.path.endsWith(".zip")) {
+                 ContextMenuItem("Unzip Here", Icons.Default.Archive, onUnzip)
+            }
+            ContextMenuItem("Copy Path", Icons.Default.ContentPaste, {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("Path", item.path)
+                clipboard.setPrimaryClip(clip)
+                onDismiss() // Dismiss menu after copy
+            })
             ContextMenuItem("Delete", Icons.Default.Delete, onDelete, DangerRed)
             if (item.type != GlaiveItem.TYPE_DIR) {
                 ContextMenuItem("Edit", Icons.Default.Edit, onEdit)
@@ -1599,6 +1782,30 @@ fun SortChip(
                 text = if (ascending) "↑" else "↓",
                 style = TextStyle(color = textColor, fontSize = 12.sp)
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MultiSelectionMenuSheet(
+    count: Int,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onCut: () -> Unit,
+    onDelete: () -> Unit,
+    onZip: () -> Unit,
+    onCopyPath: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DeepSpace) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("$count items selected", style = MaterialTheme.typography.titleLarge, color = SoftWhite)
+            Spacer(modifier = Modifier.height(16.dp))
+            ContextMenuItem("Copy", Icons.Default.Share, onCopy)
+            ContextMenuItem("Cut", Icons.Default.Edit, onCut)
+            ContextMenuItem("Zip", Icons.Default.Archive, onZip)
+            ContextMenuItem("Copy Path", Icons.Default.ContentPaste, onCopyPath)
+            ContextMenuItem("Delete", Icons.Default.Delete, onDelete, DangerRed)
         }
     }
 }

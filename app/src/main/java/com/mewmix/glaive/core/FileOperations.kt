@@ -131,4 +131,187 @@ object FileOperations {
             }
         }
     }
+
+    suspend fun listZip(zipPath: String, internalPath: String): List<com.mewmix.glaive.data.GlaiveItem> = withContext(Dispatchers.IO) {
+        val list = mutableListOf<com.mewmix.glaive.data.GlaiveItem>()
+        try {
+            java.util.zip.ZipFile(zipPath).use { zip ->
+                val entries = zip.entries()
+                val seenDirs = mutableSetOf<String>()
+                
+                // Normalize internal path: "folder/" or ""
+                val prefix = if (internalPath.isEmpty() || internalPath == "/") "" else if (internalPath.endsWith("/")) internalPath else "$internalPath/"
+                
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    val name = entry.name
+                    
+                    if (name.startsWith(prefix) && name != prefix) {
+                        val relative = name.substring(prefix.length)
+                        val slashIndex = relative.indexOf('/')
+                        
+                        if (slashIndex == -1) {
+                            // File in this directory
+                            list.add(com.mewmix.glaive.data.GlaiveItem(
+                                name = relative,
+                                path = "$zipPath/$name", // Virtual path
+                                type = if (entry.isDirectory) com.mewmix.glaive.data.GlaiveItem.TYPE_DIR else com.mewmix.glaive.data.GlaiveItem.TYPE_FILE,
+                                size = entry.size,
+                                mtime = entry.time
+                            ))
+                        } else {
+                            // Subdirectory
+                            val dirName = relative.substring(0, slashIndex)
+                            if (seenDirs.add(dirName)) {
+                                list.add(com.mewmix.glaive.data.GlaiveItem(
+                                    name = dirName,
+                                    path = "$zipPath/$prefix$dirName", // Virtual path
+                                    type = com.mewmix.glaive.data.GlaiveItem.TYPE_DIR,
+                                    size = 0,
+                                    mtime = 0
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        list
+    }
+
+    suspend fun unzip(zipFile: File, destDir: File): Boolean = withContext(Dispatchers.IO) {
+        DebugLogger.logSuspend("Unzipping ${zipFile.path} to ${destDir.path}") {
+            try {
+                java.util.zip.ZipFile(zipFile).use { zip ->
+                    val entries = zip.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        val entryFile = File(destDir, entry.name)
+                        
+                        // Security check: Zip Slip
+                        if (!entryFile.canonicalPath.startsWith(destDir.canonicalPath)) {
+                            continue
+                        }
+
+                        if (entry.isDirectory) {
+                            entryFile.mkdirs()
+                        } else {
+                            entryFile.parentFile?.mkdirs()
+                            zip.getInputStream(entry).use { input ->
+                                FileOutputStream(entryFile).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        }
+                    }
+                }
+                true
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            }
+        }
+    }
+
+    suspend fun addToZip(zipFile: File, files: List<File>, parentPathInZip: String = ""): Boolean = withContext(Dispatchers.IO) {
+        val tempFile = File(zipFile.parent, "${zipFile.name}.tmp")
+        try {
+            ZipOutputStream(BufferedOutputStream(FileOutputStream(tempFile))).use { zos ->
+                // Copy existing entries
+                if (zipFile.exists()) {
+                    java.util.zip.ZipFile(zipFile).use { zip ->
+                        val entries = zip.entries()
+                        while (entries.hasMoreElements()) {
+                            val entry = entries.nextElement()
+                            zos.putNextEntry(ZipEntry(entry.name))
+                            zip.getInputStream(entry).copyTo(zos)
+                            zos.closeEntry()
+                        }
+                    }
+                }
+                
+                // Add new files
+                val prefix = if (parentPathInZip.isNotEmpty() && !parentPathInZip.endsWith("/")) "$parentPathInZip/" else parentPathInZip
+                files.forEach { file ->
+                    if (file.isDirectory) {
+                        // For directories, we need to preserve structure relative to the file itself, but prefixed with parentPathInZip
+                        // This is tricky. Let's simplify: just add files flat or recursively?
+                        // If I paste a folder "foo" into "zip/bar/", I expect "bar/foo/..."
+                        // My zipDirectory helper uses basePath.
+                        // I need a modified zip helper that takes a prefix.
+                        zipDirectoryWithPrefix(zos, file, file.parent, prefix)
+                    } else {
+                        zipFileWithPrefix(zos, file, file.parent, prefix)
+                    }
+                }
+            }
+            if (zipFile.exists()) zipFile.delete()
+            tempFile.renameTo(zipFile)
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            tempFile.delete()
+            false
+        }
+    }
+
+    private fun zipDirectoryWithPrefix(zos: ZipOutputStream, folder: File, basePath: String?, prefix: String) {
+        val path = if (basePath != null) folder.path.substring(basePath.length + 1) else folder.name
+        zos.putNextEntry(ZipEntry(prefix + path + "/"))
+        zos.closeEntry()
+        folder.listFiles()?.forEach { file ->
+            if (file.isDirectory) {
+                zipDirectoryWithPrefix(zos, file, basePath, prefix)
+            } else {
+                zipFileWithPrefix(zos, file, basePath, prefix)
+            }
+        }
+    }
+
+    private fun zipFileWithPrefix(zos: ZipOutputStream, file: File, basePath: String?, prefix: String) {
+        val path = if (basePath != null) file.path.substring(basePath.length + 1) else file.name
+        val entry = ZipEntry(prefix + path)
+        zos.putNextEntry(entry)
+        FileInputStream(file).use { fis ->
+            BufferedInputStream(fis).use { bis ->
+                bis.copyTo(zos)
+            }
+        }
+        zos.closeEntry()
+    }
+
+    suspend fun removeFromZip(zipFile: File, entryPaths: List<String>): Boolean = withContext(Dispatchers.IO) {
+        val tempFile = File(zipFile.parent, "${zipFile.name}.tmp")
+        try {
+            val entriesToRemove = entryPaths.toSet()
+            ZipOutputStream(BufferedOutputStream(FileOutputStream(tempFile))).use { zos ->
+                java.util.zip.ZipFile(zipFile).use { zip ->
+                    val entries = zip.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        // Check if this entry matches or is inside one of the removed paths
+                        // entryPaths are full internal paths e.g. "folder/file.txt"
+                        val shouldRemove = entriesToRemove.any { path -> 
+                            entry.name == path || entry.name.startsWith("$path/")
+                        }
+                        
+                        if (!shouldRemove) {
+                            zos.putNextEntry(ZipEntry(entry.name))
+                            zip.getInputStream(entry).copyTo(zos)
+                            zos.closeEntry()
+                        }
+                    }
+                }
+            }
+            zipFile.delete()
+            tempFile.renameTo(zipFile)
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            tempFile.delete()
+            false
+        }
+    }
 }
