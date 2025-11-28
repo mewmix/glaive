@@ -216,73 +216,25 @@ fun HueWheel(
                 Color.Red
             )
 
+            val strokeWidth = 40f
+
             drawCircle(
                 brush = Brush.sweepGradient(colors, center),
                 radius = radius,
-                style = Stroke(width = 40f)
+                style = Stroke(width = strokeWidth)
             )
+
+            // Hue Indicator drawn within the Canvas so it stays aligned
+            val angleRad = Math.toRadians(hue.toDouble())
+            val indicatorCenter = Offset(
+                x = center.x + (radius * cos(angleRad).toFloat()),
+                y = center.y + (radius * sin(angleRad).toFloat())
+            )
+            // Outer white ring for visibility
+            drawCircle(color = Color.White, radius = 8f, center = indicatorCenter)
+            // Inner dark dot for contrast
+            drawCircle(color = Color.Black, radius = 5f, center = indicatorCenter)
         }
-
-        // Hue Indicator
-        // Calculate position on the ring
-        val angleRad = Math.toRadians(hue.toDouble())
-        // Adjust for SweepGradient starting at 0 (3 o'clock) or similar?
-        // Brush.sweepGradient starts at 3 o'clock (0 degrees) by default? No, usually 3 o'clock is 0.
-        // But Color.HSVToColor hue is 0..360. 0 is Red.
-        // In SweepGradient:
-        // 0.0 -> Red
-        // ...
-        // 1.0 -> Red
-        // So angle 0 should match Red.
-        // Canvas coordinate system: 0 is usually 3 o'clock.
-        // Android Hue: 0 is Red.
-        // We need to match visual to logic.
-        // Let's assume standard behavior and adjust if needed.
-
-        val radius = (wheelSize / 2) - 10.dp // Roughly center of stroke
-        // We need to map hue (0..360) to position.
-        // 0 hue = Red.
-        // If SweepGradient starts red at 3 o'clock:
-        // x = r * cos(hue)
-        // y = r * sin(hue)
-        // Note: y increases downwards.
-
-        // Let's verify SweepGradient orientation.
-        // Usually 0 is 3 o'clock.
-
-        // Indicator Position
-        // We need the indicator to orbit.
-
-        // 200.dp / 2 = 100.dp radius outer. Stroke 40f (~14dp?).
-        // Center of stroke is roughly radius - 20f.
-
-    }
-
-    // Indicator needs to be drawn or placed.
-    // Easier to draw it in Canvas above or use offset Box.
-    // Let's use offset Box for cleaner UI layer.
-
-    BoxWithConstraints(modifier = Modifier.size(wheelSize)) {
-        val center = maxWidth / 2
-        val radius = (maxWidth / 2) - 10.dp // Approximate center of stroke
-
-        val angleRad = Math.toRadians(hue.toDouble())
-
-        val centerPx = with(LocalDensity.current) { center.toPx() }
-        val radiusPx = with(LocalDensity.current) { radius.toPx() }
-
-        val offsetX = centerPx + (radiusPx * cos(angleRad).toFloat())
-        val offsetY = centerPx + (radiusPx * sin(angleRad).toFloat())
-
-        val offsetAdjustment = with(LocalDensity.current) { 12.dp.toPx() }
-
-        Box(
-            modifier = Modifier
-                .offset { IntOffset((offsetX - offsetAdjustment).roundToInt(), (offsetY - offsetAdjustment).roundToInt()) }
-                .size(24.dp)
-                .background(Color.White, CircleShape)
-                .border(2.dp, Color.Black, CircleShape)
-        )
     }
 }
 
