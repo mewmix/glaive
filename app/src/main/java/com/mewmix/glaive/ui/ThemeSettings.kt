@@ -10,6 +10,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -101,6 +104,7 @@ fun ThemeSettingsDialog(
                         Text("Cancel", color = currentTheme.colors.text)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
+                    val accentContent = if (accent.luminance() < 0.5f) Color.White else Color.Black
                     Button(
                         onClick = {
                             val fontFamily = when(fontName) {
@@ -117,9 +121,12 @@ fun ThemeSettingsDialog(
                                 )
                             )
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = accent)
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = accent,
+                            contentColor = accentContent
+                        )
                     ) {
-                        Text("Apply", color = Color.Black)
+                        Text("Apply")
                     }
                 }
             }
@@ -131,6 +138,70 @@ fun ThemeSettingsDialog(
 fun ColorPickerRow(label: String, color: Color, onColorChange: (Color) -> Unit) {
     var hexText by remember(color) {
         mutableStateOf(String.format("#%06X", (0xFFFFFF and color.toArgb())))
+    }
+    var showPicker by remember { mutableStateOf(false) }
+
+    if (showPicker) {
+        Dialog(onDismissRequest = { showPicker = false }) {
+            var tempColor by remember { mutableStateOf(color) }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = LocalGlaiveTheme.current.colors.background),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .border(1.dp, LocalGlaiveTheme.current.colors.surface, RoundedCornerShape(16.dp))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Scrollable content area
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = true)
+                            .verticalScroll(rememberScrollState())
+                            .fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("Pick Color", color = LocalGlaiveTheme.current.colors.text, style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        HsvColorPicker(
+                            initialColor = color,
+                            onColorChanged = { tempColor = it }
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+
+                    // Fixed action row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { showPicker = false }) {
+                            Text("Cancel", color = LocalGlaiveTheme.current.colors.text)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        val accent = LocalGlaiveTheme.current.colors.accent
+                        val buttonContentColor = if (accent.luminance() < 0.5f) Color.White else Color.Black
+                        Button(
+                            onClick = {
+                                onColorChange(tempColor)
+                                showPicker = false
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = accent,
+                                contentColor = buttonContentColor
+                            )
+                        ) {
+                            Text("Apply")
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Row(
@@ -147,6 +218,7 @@ fun ColorPickerRow(label: String, color: Color, onColorChange: (Color) -> Unit) 
                     .clip(CircleShape)
                     .background(color)
                     .border(1.dp, Color.Gray, CircleShape)
+                    .clickable { showPicker = true }
             )
             Spacer(modifier = Modifier.width(8.dp))
             BasicTextField(
