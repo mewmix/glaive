@@ -15,6 +15,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.mewmix.glaive.core.DebugLogger
 
 @Immutable
 data class GlaiveColors(
@@ -80,6 +81,7 @@ object ThemeManager {
     private const val KEY_FONT = "type_font"
 
     fun loadTheme(context: Context): ThemeConfig {
+        DebugLogger.log("ThemeManager: Loading theme")
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
         val colors = GlaiveColors(
@@ -96,12 +98,14 @@ object ThemeManager {
         )
 
         val fontName = prefs.getString(KEY_FONT, "Monospace") ?: "Monospace"
+        DebugLogger.log("ThemeManager: Loaded font '$fontName'")
         val fontFamily = GoogleFontsProvider.getFontFamily(fontName)
 
         return ThemeConfig(colors, shapes, GlaiveTypography(fontFamily, fontName))
     }
 
     fun saveTheme(context: Context, config: ThemeConfig) {
+        DebugLogger.log("ThemeManager: Saving theme with font '${config.typography.name}'")
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply {
             putInt(KEY_BG, config.colors.background.toArgb())
@@ -113,6 +117,21 @@ object ThemeManager {
             putFloat(KEY_BORDER, config.shapes.borderWidth.value)
             putString(KEY_FONT, config.typography.name)
         }.apply()
+    }
+
+    fun preRenderFont(fontName: String) {
+        DebugLogger.log("ThemeManager: Pre-rendering font '$fontName' to verify availability")
+        try {
+            // Attempt to resolve the font family. This doesn't guarantee visual rendering
+            // but ensures the provider is queried and any internal caching logic is triggered.
+            // If the font is invalid, GoogleFontsProvider might return a fallback,
+            // but the logging inside it will confirm the request.
+            val family = GoogleFontsProvider.getFontFamily(fontName)
+            DebugLogger.log("ThemeManager: Pre-render completed for '$fontName'. Family: $family")
+        } catch (e: Exception) {
+            DebugLogger.log("ThemeManager: Failed to pre-render font '$fontName'")
+            e.printStackTrace()
+        }
     }
 }
 

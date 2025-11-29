@@ -2,6 +2,7 @@
 
 package com.mewmix.glaive.ui
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -842,8 +843,10 @@ fun GlaiveScreen() {
                     currentTheme = themeConfig,
                     onDismiss = { showThemeSettings = false },
                     onApply = { newConfig ->
+                        ThemeManager.preRenderFont(newConfig.typography.name)
                         themeConfig = newConfig
                         ThemeManager.saveTheme(context, newConfig)
+                        (context as? Activity)?.recreate()
                         showThemeSettings = false
                     },
                     onReset = {

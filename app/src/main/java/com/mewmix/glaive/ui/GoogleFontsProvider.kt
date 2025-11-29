@@ -4,6 +4,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.googlefonts.GoogleFont
 import androidx.compose.ui.text.googlefonts.Font
 import com.mewmix.glaive.R
+import com.mewmix.glaive.core.DebugLogger
 
 object GoogleFontsProvider {
     val provider = GoogleFont.Provider(
@@ -13,6 +14,7 @@ object GoogleFontsProvider {
     )
 
     fun getFontFamily(fontName: String): FontFamily {
+        DebugLogger.log("GoogleFontsProvider: Requesting font '$fontName'")
         if (fontName.isEmpty() || fontName == "Monospace") return FontFamily.Monospace
         if (fontName == "SansSerif") return FontFamily.SansSerif
         if (fontName == "Serif") return FontFamily.Serif
