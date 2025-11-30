@@ -39,15 +39,17 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
@@ -55,7 +57,6 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -1163,8 +1164,8 @@ fun GlaiveHeader(
                             ) {
                                 item { MinimalIcon(Icons.Default.Add, onAddClick) }
                                 item { MinimalIcon(Icons.Default.Home, onHomeClick) }
-                                item { MinimalIcon(if (isGridView) Icons.Default.ViewList else Icons.Default.GridView, onToggleView) }
-                                item { MinimalIcon(Icons.Default.CallSplit, onSplitToggle, if (splitScopeEnabled) theme.colors.accent else Color.Gray) }
+                                item { MinimalIcon(if (isGridView) Icons.AutoMirrored.Filled.ViewList else Icons.Default.GridView, onToggleView) }
+                                item { MinimalIcon(Icons.AutoMirrored.Filled.CallSplit, onSplitToggle, if (splitScopeEnabled) theme.colors.accent else Color.Gray) }
                                 item { MinimalIcon(Icons.Default.Search, onToggleSearch) }
                                 item { MinimalIcon(Icons.Default.Settings, onThemeSettings) }
                             }
@@ -1282,7 +1283,7 @@ fun BreadcrumbStrip(currentPath: String, onPathJump: (String) -> Unit) {
                 )
                 if (path != currentPath) {
                     Icon(
-                        imageVector = Icons.Default.KeyboardArrowRight,
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                         contentDescription = null,
                         tint = theme.colors.accent.copy(alpha = 0.5f),
                         modifier = Modifier.size(12.dp)
@@ -1696,7 +1697,7 @@ fun ReverseGestureHotZone(
     ) {
         if (hasTrail) {
             Icon(
-                imageVector =Icons.Default.KeyboardArrowLeft,
+                imageVector =Icons.AutoMirrored.Filled.KeyboardArrowLeft,
                 contentDescription = "Reverse",
                 tint = theme.colors.accent,
                 modifier = Modifier.align(Alignment.Center)
@@ -1812,7 +1813,7 @@ fun ContextMenuSheet(
         Column(modifier = Modifier.padding(16.dp)) {
             Text(item.name, style = MaterialTheme.typography.titleLarge, color = theme.colors.text)
             Spacer(modifier = Modifier.height(16.dp))
-            ContextMenuItem("Open File Location", Icons.Default.ArrowForward, onOpenFileLocation)
+            ContextMenuItem("Open File Location", Icons.AutoMirrored.Filled.ArrowForward, onOpenFileLocation)
             ContextMenuItem(if (isFavorite) "Remove from Favorites" else "Add to Favorites", Icons.Default.Check, { onFavorite(!isFavorite) })
             ContextMenuItem("Select", Icons.Default.Check, onSelect)
             ContextMenuItem("Copy", Icons.Default.Share, onCopy)

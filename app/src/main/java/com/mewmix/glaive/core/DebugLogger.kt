@@ -22,7 +22,11 @@ object DebugLogger {
             logFile = File(dir, "glaive_debug.log")
             log("DebugLogger initialized. Log file: ${logFile?.absolutePath}")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize file logger", e)
+            try {
+                Log.e(TAG, "Failed to initialize file logger", e)
+            } catch (_: RuntimeException) {
+                println("$TAG: Failed to initialize file logger: $e")
+            }
         }
     }
 
@@ -31,7 +35,11 @@ object DebugLogger {
         val formattedMessage = "$timestamp: $message"
 
         // Logcat
-        Log.d(TAG, message)
+        try {
+            Log.d(TAG, message)
+        } catch (_: RuntimeException) {
+            println("$TAG: $message")
+        }
 
         // Memory
         memoryLog.add(formattedMessage)
@@ -55,7 +63,11 @@ object DebugLogger {
     }
 
     fun log(message: String, t: Throwable) {
-        log("$message\n${Log.getStackTraceString(t)}")
+        try {
+            log("$message\n${Log.getStackTraceString(t)}")
+        } catch (_: RuntimeException) {
+            log("$message\n${t.stackTraceToString()}")
+        }
     }
 
     fun <T> log(message: String, block: () -> T): T {

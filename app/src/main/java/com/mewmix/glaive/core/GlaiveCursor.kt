@@ -22,8 +22,8 @@ class GlaiveLazyList(
     init {
         // First pass: Count items and build offset index
         // We can estimate count to allocate IntArray
-        val estimatedCount = if (limit > 0) limit / 64 else 10
-        val tempOffsets = IntArray(estimatedCount * 2) // Simple dynamic array simulation? No, let's just use ArrayList for offsets then toIntArray
+
+
         // Actually, for "Zero Garbage", avoiding ArrayList<Integer> boxing is good.
         // But we need to know the size.
         // Let's use a simple IntArrayList logic or just two passes?

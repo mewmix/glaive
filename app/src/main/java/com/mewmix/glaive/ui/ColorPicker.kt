@@ -113,7 +113,7 @@ fun SatValPanel(
     value: Float,
     onSatValChanged: (Float, Float) -> Unit
 ) {
-    val density = LocalDensity.current.density
+
 
     Box(
         modifier = Modifier
