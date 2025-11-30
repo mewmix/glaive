@@ -95,6 +95,8 @@ import com.mewmix.glaive.core.FileOperations
 import com.mewmix.glaive.core.NativeCore
 import com.mewmix.glaive.core.FavoritesManager
 import com.mewmix.glaive.data.GlaiveItem
+import com.mewmix.glaive.core.ArchiveUtils
+import kotlinx.coroutines.CoroutineScope
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -2016,6 +2018,46 @@ private fun sharePath(context: Context, item: GlaiveItem) {
 private fun openFile(context: Context, item: GlaiveItem) {
     if (item.type == GlaiveItem.TYPE_DIR) return
     val file = File(item.path)
+
+    // NEW LOGIC: Check for virtual ZSTD file
+    if (!file.exists()) {
+        val parent = file.parentFile
+        // If parent exists and ends in .zst, this is a virtual file inside it
+        if (parent != null && parent.name.endsWith(".zst") && parent.exists()) {
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    // Extract to cache
+                    val cacheDir = File(context.cacheDir, "zst_temp")
+                    cacheDir.mkdirs()
+                    // ArchiveUtils.extractArchive handles single .zst extraction
+                    // It extracts {filename}.zst -> {dest}/{filename}
+                    ArchiveUtils.extractArchive(parent, cacheDir)
+                    
+                    val tempFile = File(cacheDir, item.name)
+                    
+                    if (tempFile.exists()) {
+                        withContext(Dispatchers.Main) {
+                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", tempFile)
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, mimeFor(item))
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            try { context.startActivity(intent) } catch (e: Exception) { 
+                                Toast.makeText(context, "No app found to open this file", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            return
+        }
+    }
+
+    // Standard logic
+    if (!file.exists()) return
+
     val uri = runCatching {
         FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
     }.getOrElse { return }

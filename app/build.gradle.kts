@@ -69,15 +69,6 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
-            // Strip zstd-jni non-Android/non-ARM64 platforms
-            excludes += "**/darwin/**"
-            excludes += "**/linux/**"
-            excludes += "**/win/**"
-            excludes += "**/aix/**"
-            excludes += "**/freebsd/**"
-            excludes += "**/android/x86/**"
-            excludes += "**/android/x86_64/**"
-            excludes += "**/android/armeabi-v7a/**"
         }
         jniLibs {
             useLegacyPackaging = false
@@ -86,7 +77,7 @@ android {
 }
 
 dependencies {
-    implementation("com.github.luben:zstd-jni:1.5.5-11")
+    implementation("com.github.luben:zstd-jni:1.5.5-11@aar")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
     implementation("androidx.activity:activity-compose:1.8.2")
