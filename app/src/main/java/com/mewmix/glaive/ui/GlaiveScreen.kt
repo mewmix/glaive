@@ -1346,14 +1346,28 @@ fun GlaiveHeader(
                                     }
                                 )
                                 if (isSearching) {
-                                    CircularProgressIndicator(
+                                    Row(
                                         modifier = Modifier
-                                            .size(20.dp)
                                             .align(Alignment.CenterEnd)
-                                            .zIndex(1f),
-                                        color = theme.colors.accent,
-                                        strokeWidth = 2.dp
-                                    )
+                                            .zIndex(1f)
+                                            .padding(end = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Searching...",
+                                            style = TextStyle(
+                                                color = theme.colors.accent.copy(alpha = 0.7f),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium
+                                            ),
+                                            modifier = Modifier.padding(end = 8.dp)
+                                        )
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            color = theme.colors.accent,
+                                            strokeWidth = 2.dp
+                                        )
+                                    }
                                 }
                             }
                         } else {
