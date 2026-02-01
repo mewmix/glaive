@@ -13,6 +13,7 @@
 #include <arm_neon.h>
 #include <android/log.h>
 #include <limits.h>
+#include <time.h>
 
 int64_t calculate_dir_size_recursive(int parent_fd, const char *path);
 
@@ -48,6 +49,12 @@ typedef struct {
     uint8_t first_char_lower;
     uint8x16_t v_first_lower;
     uint8x16_t v_first_upper;
+    // Dual-filter for SIMD
+    int use_second;
+    uint8_t second_char_lower;
+    uint8x16_t v_second_lower;
+    uint8x16_t v_second_upper;
+
     int filterMask;
 } SearchContext;
 
@@ -55,34 +62,51 @@ int64_t calculate_dir_size_recursive(int parent_fd, const char *path) {
     int64_t total_size = 0;
     struct stat st;
 
-    // Open the directory relative to the parent file descriptor
     int dir_fd = openat(parent_fd, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dir_fd == -1) {
-        return 0;
-    }
+    if (dir_fd == -1) return 0;
 
-    DIR *dir = fdopendir(dir_fd);
-    if (!dir) {
-        close(dir_fd);
-        return 0;
-    }
+    char kbuf[8192] __attribute__((aligned(8)));
+    struct linux_dirent64 *d;
+    int nread;
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
+    while ((nread = syscall(__NR_getdents64, dir_fd, kbuf, sizeof(kbuf))) > 0) {
+        int bpos = 0;
+        while (bpos < nread) {
+            d = (struct linux_dirent64 *)(kbuf + bpos);
+            bpos += d->d_reclen;
 
-        if (fstatat(dir_fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
-            if (S_ISDIR(st.st_mode)) {
-                total_size += calculate_dir_size_recursive(dir_fd, entry->d_name);
+            if (d->d_name[0] == '.') {
+                if (d->d_name[1] == 0) continue;
+                if (d->d_name[1] == '.' && d->d_name[2] == 0) continue;
+            }
+
+            unsigned char type = d->d_type;
+            if (type == DT_UNKNOWN) {
+                if (fstatat(dir_fd, d->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                    if (S_ISDIR(st.st_mode)) type = DT_DIR;
+                    else type = DT_REG;
+                }
+            }
+
+            if (type == DT_DIR) {
+                total_size += calculate_dir_size_recursive(dir_fd, d->d_name);
             } else {
-                total_size += st.st_size;
+                // For files, we need size. If type was UNKNOWN, we might have already stat'ed.
+                // But simplifying logic: if we didn't stat yet, we stat now.
+                // To avoid double stat for UNKNOWN:
+                if (d->d_type == DT_UNKNOWN) {
+                     // st is valid from above check
+                     if (!S_ISDIR(st.st_mode)) total_size += st.st_size;
+                } else {
+                     if (fstatat(dir_fd, d->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                         total_size += st.st_size;
+                     }
+                }
             }
         }
     }
 
-    closedir(dir);
+    close(dir_fd);
     return total_size;
 }
 
@@ -98,38 +122,95 @@ static inline int has_glob_tokens(const char *pattern) {
     return 0;
 }
 
+static void setup_search_context(SearchContext* ctx, const char* query, int filterMask) {
+    ctx->query = query;
+    ctx->qlen = strlen(query);
+    ctx->glob_mode = has_glob_tokens(query);
+    ctx->filterMask = filterMask;
+    ctx->use_second = 0;
+
+    // Check for *text* pattern optimization
+    if (ctx->glob_mode && ctx->qlen > 2 && ctx->query[0] == '*' && ctx->query[ctx->qlen - 1] == '*') {
+        int internal_wildcard = 0;
+        for (size_t k = 1; k < ctx->qlen - 1; k++) {
+            if (ctx->query[k] == '*' || ctx->query[k] == '?') {
+                internal_wildcard = 1;
+                break;
+            }
+        }
+        if (!internal_wildcard) {
+            ctx->query++;
+            ctx->qlen -= 2;
+            ctx->glob_mode = 0;
+        }
+    }
+
+    const char* effective_query = ctx->query;
+    ctx->first_char_lower = (uint8_t)tolower(effective_query[0]);
+    ctx->v_first_lower = vdupq_n_u8(ctx->first_char_lower);
+    ctx->v_first_upper = vdupq_n_u8((uint8_t)toupper(effective_query[0]));
+
+    if (ctx->qlen >= 2) {
+        ctx->use_second = 1;
+        ctx->second_char_lower = (uint8_t)tolower(effective_query[1]);
+        ctx->v_second_lower = vdupq_n_u8(ctx->second_char_lower);
+        ctx->v_second_upper = vdupq_n_u8((uint8_t)toupper(effective_query[1]));
+    }
+}
+
 static inline unsigned char fold_ci(unsigned char c) {
     if (c >= 'A' && c <= 'Z') return (unsigned char)(c + 32);
     return c;
 }
 
 static int optimized_neon_contains(const char *haystack, int h_len, const SearchContext* ctx) {
-    // Direct access to context to avoid setup overhead
     if (h_len < ctx->qlen) return 0;
 
     size_t n_len = ctx->qlen;
-    uint8x16_t v_lower = ctx->v_first_lower;
-    uint8x16_t v_upper = ctx->v_first_upper;
     const char* needle = ctx->query;
     uint8_t first = ctx->first_char_lower;
-
     size_t i = 0;
-    // Main SIMD loop
-    for (; i + 16 <= h_len; i += 16) {
-        uint8x16_t block = vld1q_u8((const uint8_t*)(haystack + i));
 
-        // Compare against lower and upper case first char
-        uint8x16_t eq_l = vceqq_u8(block, v_lower);
-        uint8x16_t eq_u = vceqq_u8(block, v_upper);
-        uint8x16_t eq = vorrq_u8(eq_l, eq_u);
+    if (ctx->use_second) {
+        uint8x16_t v1_l = ctx->v_first_lower;
+        uint8x16_t v1_u = ctx->v_first_upper;
+        uint8x16_t v2_l = ctx->v_second_lower;
+        uint8x16_t v2_u = ctx->v_second_upper;
+        uint8_t second = ctx->second_char_lower;
 
-        // Fast check if any bit is set in the 128-bit vector
-        uint64x2_t fold = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(eq)));
-        if (vgetq_lane_u64(fold, 0) | vgetq_lane_u64(fold, 1)) {
-            for (int k = 0; k < 16; k++) {
-                // Verify manually
-                if (tolower(haystack[i + k]) == first) {
-                    if (strncasecmp(haystack + i + k, needle, n_len) == 0) return 1;
+        for (; i + 16 <= h_len; i += 16) {
+            uint8x16_t block1 = vld1q_u8((const uint8_t*)(haystack + i));
+            uint8x16_t block2 = vld1q_u8((const uint8_t*)(haystack + i + 1));
+
+            uint8x16_t eq1 = vorrq_u8(vceqq_u8(block1, v1_l), vceqq_u8(block1, v1_u));
+            uint8x16_t eq2 = vorrq_u8(vceqq_u8(block2, v2_l), vceqq_u8(block2, v2_u));
+            uint8x16_t eq = vandq_u8(eq1, eq2);
+
+            uint64x2_t fold = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(eq)));
+            if (vgetq_lane_u64(fold, 0) | vgetq_lane_u64(fold, 1)) {
+                for (int k = 0; k < 16; k++) {
+                    if (tolower(haystack[i + k]) == first &&
+                        tolower(haystack[i + k + 1]) == second) {
+                        if (strncasecmp(haystack + i + k, needle, n_len) == 0) return 1;
+                    }
+                }
+            }
+        }
+    } else {
+        // Single char SIMD
+        uint8x16_t v_lower = ctx->v_first_lower;
+        uint8x16_t v_upper = ctx->v_first_upper;
+
+        for (; i + 16 <= h_len; i += 16) {
+            uint8x16_t block = vld1q_u8((const uint8_t*)(haystack + i));
+            uint8x16_t eq = vorrq_u8(vceqq_u8(block, v_lower), vceqq_u8(block, v_upper));
+
+            uint64x2_t fold = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(eq)));
+            if (vgetq_lane_u64(fold, 0) | vgetq_lane_u64(fold, 1)) {
+                for (int k = 0; k < 16; k++) {
+                    if (tolower(haystack[i + k]) == first) {
+                        if (strncasecmp(haystack + i + k, needle, n_len) == 0) return 1;
+                    }
                 }
             }
         }
@@ -554,15 +635,7 @@ Java_com_mewmix_glaive_core_NativeCore_nativeSearch(JNIEnv *env, jobject clazz, 
 
     // Init Context
     SearchContext ctx;
-    ctx.query = query;
-    ctx.qlen = strlen(query);
-    ctx.glob_mode = has_glob_tokens(query);
-    ctx.filterMask = filterMask;
-
-    // Precompute SIMD constants
-    ctx.first_char_lower = (uint8_t)tolower(query[0]);
-    ctx.v_first_lower = vdupq_n_u8(ctx.first_char_lower);
-    ctx.v_first_upper = vdupq_n_u8((uint8_t)toupper(query[0]));
+    setup_search_context(&ctx, query, filterMask);
 
     unsigned char *head = buffer;
     unsigned char *end = buffer + capacity;
@@ -584,4 +657,103 @@ Java_com_mewmix_glaive_core_NativeCore_nativeSearch(JNIEnv *env, jobject clazz, 
     (*env)->ReleaseStringUTFChars(env, jQuery, query);
     
     return (jint)(head - buffer);
+}
+
+// ==========================================
+// BENCHMARK
+// ==========================================
+static void create_benchmark_files(const char* base_path) {
+    mkdir(base_path, 0777);
+    char path[4096];
+    // 20 dirs * 500 files = 10,000 files
+    for (int i = 0; i < 20; i++) {
+        snprintf(path, sizeof(path), "%s/dir_%d", base_path, i);
+        mkdir(path, 0777);
+        for (int j = 0; j < 500; j++) {
+            char fpath[4096];
+            snprintf(fpath, sizeof(fpath), "%s/file_%d_%d.txt", path, i, j);
+            if (access(fpath, F_OK) == -1) {
+                int fd = open(fpath, O_CREAT | O_WRONLY, 0666);
+                if (fd != -1) close(fd);
+            }
+        }
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_mewmix_glaive_core_NativeCore_nativeRunBenchmark(JNIEnv *env, jobject clazz, jstring jPath) {
+    const char *path = (*env)->GetStringUTFChars(env, jPath, NULL);
+    char bench_path[4096];
+    snprintf(bench_path, sizeof(bench_path), "%s/BENCHMARK", path);
+
+    struct timespec start, end;
+
+    LOGE("BENCHMARK STARTING at %s", bench_path);
+
+    // 1. SETUP
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    create_benchmark_files(bench_path);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed_setup = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    LOGE("BENCHMARK SETUP: %.6f s", elapsed_setup);
+
+    // 2. DIR SIZE (RECURSIVE)
+    int fd = open(bench_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd != -1) {
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        int64_t size = calculate_dir_size_recursive(fd, ".");
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        double elapsed_size = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+        LOGE("BENCHMARK DIR SIZE: %.6f s (Size: %lld)", elapsed_size, (long long)size);
+        close(fd);
+    } else {
+        LOGE("BENCHMARK DIR SIZE: Failed to open dir");
+    }
+
+    // 3. SEARCH (SUBSTRING)
+    size_t cap = 2 * 1024 * 1024;
+    unsigned char* buffer = malloc(cap);
+    if (!buffer) {
+        LOGE("BENCHMARK: Malloc failed");
+        (*env)->ReleaseStringUTFChars(env, jPath, path);
+        return;
+    }
+
+    const char* queries[] = {"file_10_20", "file_5"}; // Specific, Common
+    for (int q = 0; q < 2; q++) {
+        const char* query = queries[q];
+        unsigned char* head = buffer;
+        unsigned char* buf_end = buffer + cap;
+
+        SearchContext ctx;
+        setup_search_context(&ctx, query, 0);
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        recursive_scan_optimized(strdup(bench_path), strlen(bench_path), strlen(bench_path), &ctx, &head, buf_end);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+        LOGE("BENCHMARK SEARCH '%s': %.6f s (Found: %ld)", query, elapsed, (head - buffer)/16);
+    }
+
+    // 4. SEARCH (GLOB)
+    const char* globs[] = {"*file_10_20*", "file_5*"};
+    for (int q = 0; q < 2; q++) {
+        const char* query = globs[q];
+        unsigned char* head = buffer;
+        unsigned char* buf_end = buffer + cap;
+
+        SearchContext ctx;
+        setup_search_context(&ctx, query, 0);
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        recursive_scan_optimized(strdup(bench_path), strlen(bench_path), strlen(bench_path), &ctx, &head, buf_end);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+        LOGE("BENCHMARK GLOB '%s': %.6f s (Found: %ld)", query, elapsed, (head - buffer)/16);
+    }
+
+    free(buffer);
+    (*env)->ReleaseStringUTFChars(env, jPath, path);
 }

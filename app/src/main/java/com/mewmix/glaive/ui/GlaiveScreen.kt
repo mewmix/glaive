@@ -168,6 +168,8 @@ fun GlaiveScreen() {
         var clipboardItems by remember { mutableStateOf<List<File>>(emptyList()) }
         var isCutOperation by remember { mutableStateOf(false) }
         var showCreateDialog by remember { mutableStateOf(false) }
+        var showDropDialog by remember { mutableStateOf(false) }
+        var dropActionTarget by remember { mutableStateOf(0) }
         var showEditor by remember { mutableStateOf(false) }
         var editorFile by remember { mutableStateOf<File?>(null) }
         val pathHistory = remember { mutableStateListOf<String>() }
@@ -196,7 +198,7 @@ fun GlaiveScreen() {
 
         val scope = rememberCoroutineScope()
 
-        fun runBlocking(message: String, block: suspend () -> Unit) {
+        fun performAsyncOperation(message: String, block: suspend () -> Unit) {
             blockingMessage = message
             scope.launch {
                 try {
@@ -204,43 +206,6 @@ fun GlaiveScreen() {
                 } finally {
                     blockingMessage = null
                 }
-            }
-        }
-
-        fun handleDrop(event: DragAndDropEvent, targetPaneIndex: Int) {
-            val clipData = event.toAndroidDragEvent().clipData ?: return
-            if (clipData.itemCount > 0) {
-                val droppedPaths = mutableListOf<String>()
-                for (i in 0 until clipData.itemCount) {
-                    val item = clipData.getItemAt(i)
-                    if (item.text != null) {
-                        droppedPaths.add(item.text.toString())
-                    }
-                }
-
-                if (droppedPaths.isNotEmpty()) {
-                    // Default behavior for Drag & Drop is Copy
-                    clipboardItems = droppedPaths.map { File(it) }
-                    isCutOperation = false
-                    handlePaste(targetPaneIndex)
-                    Toast.makeText(context, "Copied ${droppedPaths.size} items", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        fun checkInefficientAndRun(files: List<File>, onProceed: () -> Unit) {
-            val hasCompressed = files.any { file ->
-                // Basic check on extension. For directories, we'd need to recurse,
-                // but for now we assume user knows what's in a dir or we only check file level.
-                // A deep check might be too slow for UI thread.
-                // If it is a directory, we can skip or assume it might contain mixed content.
-                // Strict check: if it is a file and matches extension.
-                !file.isDirectory && INEFF_EXTENSIONS.contains(file.extension.lowercase(Locale.getDefault()))
-            }
-            if (hasCompressed) {
-                inefficientAction = onProceed
-            } else {
-                onProceed()
             }
         }
 
@@ -276,7 +241,7 @@ fun GlaiveScreen() {
         fun handlePaste(paneIndex: Int) {
             val count = clipboardItems.size
             val op = if (isCutOperation) "Moving" else "Copying"
-            runBlocking("$op $count items...") {
+            performAsyncOperation("$op $count items...") {
                 DebugLogger.logSuspend("Pasting ${clipboardItems.size} items to pane $paneIndex") {
                     val targetPath = panePath(paneIndex)
                     val archiveRoot = FileOperations.getArchiveRoot(targetPath)
@@ -305,6 +270,63 @@ fun GlaiveScreen() {
                         if (paneIndex == 0) rawList = updated else secondaryRawList = updated
                     }
                 }
+            }
+        }
+
+        fun handleDrop(event: DragAndDropEvent, targetPaneIndex: Int) {
+            val clipData = event.toAndroidDragEvent().clipData ?: return
+            if (clipData.itemCount > 0) {
+                val droppedPaths = mutableListOf<String>()
+                for (i in 0 until clipData.itemCount) {
+                    val item = clipData.getItemAt(i)
+                    if (item.text != null) {
+                        droppedPaths.add(item.text.toString())
+                    }
+                }
+
+                if (droppedPaths.isNotEmpty()) {
+                    val isTrashSource = droppedPaths.any { RecycleBinManager.isTrashItem(it) }
+                    if (isTrashSource) {
+                        performAsyncOperation("Restoring dropped items...") {
+                            droppedPaths.forEach { path ->
+                                if (RecycleBinManager.isTrashItem(path)) {
+                                    val trashFile = File(path)
+                                    val targetDir = File(panePath(targetPaneIndex))
+                                    val name = trashFile.name
+                                    val underscoreIndex = name.indexOf('_')
+                                    val originalName = if (underscoreIndex > 0) name.substring(underscoreIndex + 1) else name
+                                    val destFile = File(targetDir, originalName)
+
+                                    if (FileOperations.move(trashFile, destFile)) {
+                                        RecycleBinManager.deletePermanently(trashFile) // Cleans index
+                                    }
+                                }
+                            }
+                            val updated = NativeCore.list(panePath(targetPaneIndex))
+                            if (targetPaneIndex == 0) rawList = updated else secondaryRawList = updated
+                        }
+                    } else {
+                        clipboardItems = droppedPaths.map { File(it) }
+                        dropActionTarget = targetPaneIndex
+                        showDropDialog = true
+                    }
+                }
+            }
+        }
+
+        fun checkInefficientAndRun(files: List<File>, onProceed: () -> Unit) {
+            val hasCompressed = files.any { file ->
+                // Basic check on extension. For directories, we'd need to recurse,
+                // but for now we assume user knows what's in a dir or we only check file level.
+                // A deep check might be too slow for UI thread.
+                // If it is a directory, we can skip or assume it might contain mixed content.
+                // Strict check: if it is a file and matches extension.
+                !file.isDirectory && INEFF_EXTENSIONS.contains(file.extension.lowercase(Locale.getDefault()))
+            }
+            if (hasCompressed) {
+                inefficientAction = onProceed
+            } else {
+                onProceed()
             }
         }
 
@@ -819,7 +841,7 @@ fun GlaiveScreen() {
                     isTrashItem = RecycleBinManager.isTrashItem(contextMenuTarget!!.path),
                     onRestore = {
                          val file = File(contextMenuTarget!!.path)
-                         runBlocking("Restoring ${file.name}...") {
+                         performAsyncOperation("Restoring ${file.name}...") {
                              RecycleBinManager.restore(file)
                              // Refresh
                              if (contextMenuPane == 0) {
@@ -854,11 +876,11 @@ fun GlaiveScreen() {
                     },
                     onZip = {
                         val targetFile = File(contextMenuTarget!!.path)
-                        runBlocking("Zipping ${targetFile.name}...") {
+                        performAsyncOperation("Zipping ${targetFile.name}...") {
                             val zipFile = File(targetFile.parent, "${targetFile.name}.zip")
                             if (targetFile.canonicalPath == zipFile.canonicalPath) {
                                 Toast.makeText(context, "Cannot zip a file into itself", Toast.LENGTH_SHORT).show()
-                                return@runBlocking
+                                return@performAsyncOperation
                             }
                             FileOperations.createArchive(listOf(targetFile), zipFile)
                             if (contextMenuPane == 0) {
@@ -874,11 +896,11 @@ fun GlaiveScreen() {
                     onCompressZstd = {
                         val targetFile = File(contextMenuTarget!!.path)
                         checkInefficientAndRun(listOf(targetFile)) {
-                             runBlocking("Compressing ${targetFile.name}...") {
+                             performAsyncOperation("Compressing ${targetFile.name}...") {
                                 val zstFile = File(targetFile.parent, "${targetFile.name}.tar.zst")
                                 if (targetFile.canonicalPath == zstFile.canonicalPath) {
                                     Toast.makeText(context, "Cannot compress a file into itself", Toast.LENGTH_SHORT).show()
-                                    return@runBlocking
+                                    return@performAsyncOperation
                                 }
                                 FileOperations.createArchive(listOf(targetFile), zstFile)
                                 if (contextMenuPane == 0) {
@@ -906,7 +928,7 @@ fun GlaiveScreen() {
                     },
                     onExtract = {
                         val targetFile = File(contextMenuTarget!!.path)
-                        runBlocking("Extracting ${targetFile.name}...") {
+                        performAsyncOperation("Extracting ${targetFile.name}...") {
                             val destDir = targetFile.parentFile ?: targetFile
                             FileOperations.extractArchive(targetFile, destDir)
                             val updated = NativeCore.list(panePath(activePane))
@@ -956,7 +978,7 @@ fun GlaiveScreen() {
                     onZip = {
                         val files = selectedPaths.map { File(it) }
                         if (files.isNotEmpty()) {
-                            runBlocking("Zipping ${files.size} items...") {
+                            performAsyncOperation("Zipping ${files.size} items...") {
                                 val parent = files.first().parentFile
                                 val zipName = if (files.size == 1) "${files.first().name}.zip" else "archive_${System.currentTimeMillis()}.zip"
                                 val zipFile = File(parent, zipName)
@@ -972,7 +994,7 @@ fun GlaiveScreen() {
                         val files = selectedPaths.map { File(it) }
                         if (files.isNotEmpty()) {
                             checkInefficientAndRun(files) {
-                                runBlocking("Compressing ${files.size} items...") {
+                                performAsyncOperation("Compressing ${files.size} items...") {
                                     val parent = files.first().parentFile
                                     val name = if (files.size == 1) "${files.first().name}.tar.zst" else "archive_${System.currentTimeMillis()}.tar.zst"
                                     val destFile = File(parent, name)
@@ -988,7 +1010,7 @@ fun GlaiveScreen() {
                     isTrashMode = RecycleBinManager.isTrashItem(panePath(activePane)),
                     onRestore = {
                         val files = selectedPaths.map { File(it) }
-                        runBlocking("Restoring ${files.size} items...") {
+                        performAsyncOperation("Restoring ${files.size} items...") {
                             files.forEach { RecycleBinManager.restore(it) }
                             // Refresh
                             if (activePane == 0) {
@@ -1016,6 +1038,46 @@ fun GlaiveScreen() {
                         Toast.makeText(context, "Paths copied to clipboard", Toast.LENGTH_SHORT).show()
                         selectedPaths = emptySet()
                         showMultiSelectionMenu = false
+                    }
+                )
+            }
+
+            // -- DROP DIALOG --
+            if (showDropDialog) {
+                AlertDialog(
+                    onDismissRequest = { showDropDialog = false },
+                    containerColor = theme.colors.surface,
+                    title = { Text("Drop Action", color = theme.colors.text) },
+                    text = { Text("Choose action for dropped files:", color = theme.colors.text) },
+                    confirmButton = {
+                        Row {
+                            Button(
+                                onClick = {
+                                    isCutOperation = true // Move
+                                    handlePaste(dropActionTarget)
+                                    showDropDialog = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = theme.colors.accent)
+                            ) {
+                                Text("Move")
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    isCutOperation = false // Copy
+                                    handlePaste(dropActionTarget)
+                                    showDropDialog = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = theme.colors.accent)
+                            ) {
+                                Text("Copy")
+                            }
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showDropDialog = false }) {
+                            Text("Cancel", color = theme.colors.error)
+                        }
                     }
                 )
             }
@@ -1093,9 +1155,9 @@ fun GlaiveScreen() {
                     isTrashBin = RecycleBinManager.isTrashItem(deleteAction!!.first.firstOrNull() ?: ""),
                     onConfirm = { permanent ->
                         val (paths, pane) = deleteAction!!
-                        runBlocking(if (permanent) "Deleting forever..." else "Moving to Trash...") {
+                        performAsyncOperation(if (permanent) "Deleting forever..." else "Moving to Trash...") {
                             // Check if inside archive
-                            val firstPath = paths.firstOrNull() ?: return@runBlocking
+                            val firstPath = paths.firstOrNull() ?: return@performAsyncOperation
                             val archiveRoot = FileOperations.getArchiveRoot(firstPath)
 
                             if (archiveRoot != null) {
