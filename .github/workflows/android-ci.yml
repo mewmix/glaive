@@ -1,13 +1,13 @@
-name: Android CI - TTS Refactor
+name: Android CI - Release
 
 on:
   push:
-    branches: [ "claude/refactor-tts-service-hob5N", "latest", "main" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "latest", "main" ]
+    branches: [ "main" ]
 
 jobs:
-  build:
+  build_release:
     runs-on: ubuntu-latest
 
     steps:
@@ -29,27 +29,30 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
-    - name: Build with Gradle
-      run: ./gradlew build --no-daemon --stacktrace
+    - name: Decode Keystore
+      env:
+        ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      run: |
+        echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.jks
 
-    - name: Run unit tests
-      run: ./gradlew test --no-daemon --stacktrace
+    - name: Create keystore.properties
+      env:
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      run: |
+        echo "storePassword=$KEYSTORE_PASSWORD" > keystore.properties
+        echo "keyPassword=$KEY_PASSWORD" >> keystore.properties
+        echo "keyAlias=$KEY_ALIAS" >> keystore.properties
+        echo "storeFile=release.jks" >> keystore.properties
 
-    - name: Assemble Debug APK
-      run: ./gradlew assembleDebug --no-daemon --stacktrace
+    - name: Build Release APK
+      run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-    - name: Upload build artifacts
+    - name: Upload Release APK
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: app-debug
-        path: app/build/outputs/apk/debug/app-debug.apk
-        retention-days: 7
-
-    - name: Upload test results
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-results
-        path: '**/build/test-results/**/*.xml'
+        name: app-release
+        path: app/build/outputs/apk/release/*.apk
         retention-days: 7

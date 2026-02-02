@@ -3,8 +3,7 @@
     <item android:gravity="center">
         <bitmap
             android:src="@drawable/app_icon"
-            android:antialias="true"
-            android:filterBitmap="true" />
+            android:antialias="true" />
     </item>
     <!-- Note: The adaptive icon mask will handle clipping. -->
 </layer-list>
