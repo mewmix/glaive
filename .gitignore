@@ -40,3 +40,6 @@ android_sdk/
 *.zip
 .cxx/
 *.log
+
+# Keystore secrets
+keystore.properties
