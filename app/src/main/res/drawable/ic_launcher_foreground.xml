@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:gravity="center">
-        <bitmap
-            android:src="@drawable/app_icon"
-            android:antialias="true" />
+        <inset android:inset="18dp">
+            <bitmap
+                android:src="@drawable/app_icon"
+                android:antialias="true" />
+        </inset>
     </item>
-    <!-- Note: The adaptive icon mask will handle clipping. -->
+    <!-- Keep a 72dp safe zone inside the 108dp adaptive icon. -->
 </layer-list>
