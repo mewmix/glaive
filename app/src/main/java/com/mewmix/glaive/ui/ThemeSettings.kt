@@ -100,7 +100,7 @@ fun ThemeSettingsDialog(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Version: ${BuildConfig.VERSION_NAME} ${BuildConfig.VERSION_CODE}",
+                            text = "Version: ${BuildConfig.VERSION_NAME}",
                             color = Color.Gray,
                             fontSize = 12.sp
                         )
