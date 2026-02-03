@@ -1532,6 +1532,11 @@ fun PaneBrowser(
     val theme = LocalGlaiveTheme.current
     var showMaximizeButton by remember { mutableStateOf(true) }
     
+    // Deduplicate items to prevent crash
+    val uniqueList = remember(displayedList) { 
+        displayedList.distinctBy { it.path } 
+    }
+    
     LaunchedEffect(showMaximizeButton) {
         if (showMaximizeButton) {
             delay(3000)
@@ -1616,9 +1621,9 @@ fun PaneBrowser(
         }
 
         if (isSearchMode) {
-             val (local, system) = remember(displayedList, activePath) {
+             val (local, system) = remember(uniqueList, activePath) {
                 val searchRoot = if (activePath.endsWith("/")) activePath else "$activePath/"
-                displayedList.partition { it.path == activePath || it.path.startsWith(searchRoot) }
+                uniqueList.partition { it.path == activePath || it.path.startsWith(searchRoot) }
             }
             val (localDirs, localFiles) = remember(local) {
                 local.partition { it.type == GlaiveItem.TYPE_DIR }
@@ -1687,7 +1692,7 @@ fun PaneBrowser(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(displayedList, key = { it.path }) { item ->
+                items(uniqueList, key = { it.path }) { item ->
                     val dragModifier = Modifier.dragAndDropSource {
                         detectDragGesturesAfterLongPress(
                             onDragStart = {
@@ -1724,7 +1729,7 @@ fun PaneBrowser(
                 contentPadding = PaddingValues(bottom = 140.dp, top = 8.dp, start = 16.dp, end = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(displayedList, key = { it.path }) { item ->
+                items(uniqueList, key = { it.path }) { item ->
                     val dragModifier = Modifier.dragAndDropSource {
                         detectDragGesturesAfterLongPress(
                             onDragStart = {
