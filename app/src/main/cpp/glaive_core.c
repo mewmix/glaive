@@ -20,6 +20,11 @@
 #define LOG_TAG "GLAIVE_C"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+// Feature flags (default off) for experimental paths
+#ifndef GLAIVE_EXPERIMENTAL_FASTSORT
+#define GLAIVE_EXPERIMENTAL_FASTSORT 0
+#endif
+
 // Kernel struct for getdents64
 struct linux_dirent64 {
     unsigned long long d_ino;
@@ -255,6 +260,63 @@ static inline unsigned char fold_ci(unsigned char c) {
     return c;
 }
 
+#if defined(__aarch64__) && GLAIVE_EXPERIMENTAL_FASTSORT
+// NEON ASCII tolower for 16-byte vector
+static inline uint8x16_t v_tolower_ascii(uint8x16_t v) {
+    const uint8x16_t diff = vdupq_n_u8(0x20);
+    const uint8x16_t minA = vdupq_n_u8('A');
+    const uint8x16_t maxZ = vdupq_n_u8('Z');
+    uint8x16_t geA = vcgeq_u8(v, minA);
+    uint8x16_t leZ = vcleq_u8(v, maxZ);
+    uint8x16_t mask = vandq_u8(geA, leZ);
+    return vorrq_u8(v, vandq_u8(mask, diff));
+}
+
+// Fast case-insensitive ASCII compare. Falls back to scalar at first stop.
+static int fast_strcasecmp_neon(const char* s1, const char* s2) {
+    const uint8_t* p1 = (const uint8_t*)s1;
+    const uint8_t* p2 = (const uint8_t*)s2;
+    const uint8x16_t vzero = vdupq_n_u8(0);
+
+    size_t i = 0;
+    for (;;) {
+        uint8x16_t a = vld1q_u8(p1 + i);
+        uint8x16_t b = vld1q_u8(p2 + i);
+        uint8x16_t a0 = vceqq_u8(a, vzero);
+        uint8x16_t b0 = vceqq_u8(b, vzero);
+        uint8x16_t al = v_tolower_ascii(a);
+        uint8x16_t bl = v_tolower_ascii(b);
+        uint8x16_t neq = vmvnq_u8(vceqq_u8(al, bl));
+        uint8x16_t stop = vorrq_u8(neq, vorrq_u8(a0, b0));
+        // horizontal OR reduction
+        uint64x2_t red = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(stop)));
+        if (vgetq_lane_u64(red, 0) | vgetq_lane_u64(red, 1)) break;
+        i += 16;
+    }
+
+    // Scalar tail for correctness
+    const unsigned char* x = (const unsigned char*)(p1 + i);
+    const unsigned char* y = (const unsigned char*)(p2 + i);
+    int d;
+    do {
+        unsigned char c1 = *x++;
+        unsigned char c2 = *y++;
+        if (c1 >= 'A' && c1 <= 'Z') c1 = (unsigned char)(c1 + 32);
+        if (c2 >= 'A' && c2 <= 'Z') c2 = (unsigned char)(c2 + 32);
+        d = (int)c1 - (int)c2;
+    } while (d == 0 && x[-1] != 0 && y[-1] != 0);
+    return d;
+}
+#endif
+
+static inline int strcasecmp_fast(const char* a, const char* b) {
+#if defined(__aarch64__) && GLAIVE_EXPERIMENTAL_FASTSORT
+    return fast_strcasecmp_neon(a, b);
+#else
+    return strcasecmp(a, b);
+#endif
+}
+
 static int optimized_neon_contains(const char *haystack, int h_len, const SearchContext* ctx) {
     if (h_len < ctx->qlen) return 0;
     size_t n_len = ctx->qlen;
@@ -443,23 +505,23 @@ int compare_entries(const void* a, const void* b) {
 
     int result = 0;
     switch (g_sort_mode) {
-        case 0: result = strcasecmp(ea->name, eb->name); break;
+        case 0: result = strcasecmp_fast(ea->name, eb->name); break;
         case 2:
             if (ea->size < eb->size) result = -1;
             else if (ea->size > eb->size) result = 1;
-            else result = strcasecmp(ea->name, eb->name);
+            else result = strcasecmp_fast(ea->name, eb->name);
             break;
         case 1:
             if (ea->time < eb->time) result = -1;
             else if (ea->time > eb->time) result = 1;
-            else result = strcasecmp(ea->name, eb->name);
+            else result = strcasecmp_fast(ea->name, eb->name);
             break;
         case 3:
             if (ea->type < eb->type) result = -1;
             else if (ea->type > eb->type) result = 1;
-            else result = strcasecmp(ea->name, eb->name);
+            else result = strcasecmp_fast(ea->name, eb->name);
             break;
-        default: result = strcasecmp(ea->name, eb->name);
+        default: result = strcasecmp_fast(ea->name, eb->name);
     }
     return g_sort_asc ? result : -result;
 }
@@ -665,6 +727,14 @@ void* worker_thread(void* arg) {
     unsigned char* head = local_buf;
     unsigned char* end = local_buf + LOCAL_BUF_SIZE;
 
+    // Reuse a single getdents buffer per worker to avoid per-directory malloc/free
+    size_t kbuf_size2 = 65536; // 64KB
+    char* kbuf2 = (char*)malloc(kbuf_size2);
+    if (!kbuf2) {
+        // Fallback to a smaller stack buffer path by exiting quickly
+        return NULL;
+    }
+
     while (1) {
         if (atomic_load(&g_cancel_search)) {
             pthread_mutex_lock(&q->lock);
@@ -679,15 +749,6 @@ void* worker_thread(void* arg) {
 
         int fd = open(item->path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (fd != -1) {
-            size_t kbuf_size2 = 65536; // 64KB
-            char* kbuf2 = (char*)malloc(kbuf_size2);
-            if (!kbuf2) {
-                close(fd);
-                free(item->path);
-                free(item);
-                queue_worker_done(q);
-                continue;
-            }
             struct linux_dirent64 *d;
             int nread;
 
@@ -728,7 +789,8 @@ void* worker_thread(void* arg) {
                             }
 
                             size_t full_len = item->len + 1 + name_len;
-                            size_t rel_len = full_len - (gbuf->base_len + 1);
+                            size_t base_index = (gbuf->base_len + 1 <= item->len) ? (gbuf->base_len + 1) : item->len;
+                            size_t rel_len = full_len - base_index;
 
                             if (head + 18 + rel_len > end) {
                                 gbuf_write(gbuf, local_buf, head - local_buf);
@@ -740,8 +802,8 @@ void* worker_thread(void* arg) {
                                 *head++ = g_type;
                                 *head++ = (unsigned char)proto_len;
 
-                                char* base_ptr = item->path + gbuf->base_len + 1;
-                                size_t prefix_len = item->len - (gbuf->base_len + 1);
+                                char* base_ptr = item->path + base_index;
+                                size_t prefix_len = (item->len > base_index) ? (item->len - base_index) : 0;
                                 if (prefix_len > 0) {
                                     size_t copy_len = (prefix_len > proto_len) ? proto_len : prefix_len;
                                     memcpy(head, base_ptr, copy_len);
@@ -764,7 +826,6 @@ void* worker_thread(void* arg) {
                     }
                 }
             }
-            free(kbuf2);
             close(fd);
         }
         free(item->path);
@@ -774,6 +835,7 @@ void* worker_thread(void* arg) {
     if (head > local_buf) {
         gbuf_write(gbuf, local_buf, head - local_buf);
     }
+    free(kbuf2);
     return NULL;
 }
 
@@ -817,7 +879,7 @@ Java_com_mewmix_glaive_core_NativeCore_nativeSearch(JNIEnv *env, jobject clazz, 
     long cores = sysconf(_SC_NPROCESSORS_ONLN);
     if (cores < 1) cores = 4;
     int NUM_THREADS = (int)cores;
-    if (NUM_THREADS < 4) NUM_THREADS = 4;
+    if (NUM_THREADS < 2) NUM_THREADS = 2;
     if (NUM_THREADS > 8) NUM_THREADS = 8;
     pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * NUM_THREADS);
     WorkerArgs args = { .queue = &q, .gbuf = &gbuf, .ctx = &ctx };
