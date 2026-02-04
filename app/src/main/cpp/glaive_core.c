@@ -43,6 +43,7 @@ typedef enum {
 // GLOBALS & SYNC
 // ==========================================
 static volatile atomic_int g_cancel_search = 0;
+static volatile atomic_long g_stat_calls = 0;
 
 JNIEXPORT void JNICALL
 Java_com_mewmix_glaive_core_NativeCore_nativeCancelSearch(JNIEnv *env, jobject clazz) {
@@ -422,6 +423,7 @@ void* stat_worker_thread(void* arg) {
                  if (S_ISDIR(st.st_mode)) e->type = TYPE_DIR;
                  else if (e->type == TYPE_UNKNOWN) e->type = fast_get_type(e->name, e->name_len);
             }
+            atomic_fetch_add(&g_stat_calls, 1);
         } else {
              if (e->type == TYPE_UNKNOWN) e->type = fast_get_type(e->name, e->name_len);
         }
@@ -488,12 +490,24 @@ Java_com_mewmix_glaive_core_NativeCore_nativeFillBuffer(JNIEnv *env, jobject cla
         return -3;
     }
 
-    char kbuf[4096] __attribute__((aligned(8)));
+    // Use a larger getdents64 buffer to reduce syscalls on large directories
+    size_t kbuf_size = 65536; // 64KB
+    char* kbuf = (char*)malloc(kbuf_size);
+    if (!kbuf) {
+        free(entries);
+        close(fd);
+        (*env)->ReleaseStringUTFChars(env, jPath, path);
+        return -3;
+    }
     struct linux_dirent64 *d;
     int nread;
 
+    // Timing helpers
+    struct timespec t0, t1, t2, t3, t4;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
     // PHASE 1: READ ENTRIES (SERIAL)
-    while ((nread = syscall(__NR_getdents64, fd, kbuf, sizeof(kbuf))) > 0) {
+    while ((nread = syscall(__NR_getdents64, fd, kbuf, kbuf_size)) > 0) {
         int bpos = 0;
         while (bpos < nread) {
             d = (struct linux_dirent64 *)(kbuf + bpos);
@@ -528,24 +542,32 @@ Java_com_mewmix_glaive_core_NativeCore_nativeFillBuffer(JNIEnv *env, jobject cla
             count++;
         }
     }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
 
-    // PHASE 2: STAT (PARALLEL)
-    if (count > 0) {
-        #define NUM_STAT_THREADS 4
-        if (count < 100) {
-             StatWorkerArgs args = { .dirfd = fd, .entries = entries, .start_index = 0, .end_index = count };
-             stat_worker_thread(&args);
+    // PHASE 2: STAT (PARALLEL or LAZY)
+    int need_full_stat = (sortMode == 1 || sortMode == 2); // time or size sort
+    atomic_store(&g_stat_calls, 0);
+    if (count > 0 && need_full_stat) {
+        long cores = sysconf(_SC_NPROCESSORS_ONLN);
+        if (cores < 1) cores = 4;
+        int num_threads = (int)cores;
+        if (num_threads > 6) num_threads = 6; // clamp for stat
+        if (num_threads < 2) num_threads = 2;
+
+        if (count < 100 || num_threads == 1) {
+            StatWorkerArgs args = { .dirfd = fd, .entries = entries, .start_index = 0, .end_index = count };
+            stat_worker_thread(&args);
         } else {
-            pthread_t threads[NUM_STAT_THREADS];
-            int created[NUM_STAT_THREADS];
-            StatWorkerArgs args[NUM_STAT_THREADS];
-            size_t chunk = count / NUM_STAT_THREADS;
+            pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * num_threads);
+            int* created = (int*)malloc(sizeof(int) * num_threads);
+            StatWorkerArgs* args = (StatWorkerArgs*)malloc(sizeof(StatWorkerArgs) * num_threads);
+            size_t chunk = count / num_threads;
 
-            for (int i = 0; i < NUM_STAT_THREADS; i++) {
+            for (int i = 0; i < num_threads; i++) {
                 args[i].dirfd = fd;
                 args[i].entries = entries;
                 args[i].start_index = i * chunk;
-                args[i].end_index = (i == NUM_STAT_THREADS - 1) ? count : (i + 1) * chunk;
+                args[i].end_index = (i == num_threads - 1) ? count : (i + 1) * chunk;
                 if (pthread_create(&threads[i], NULL, stat_worker_thread, &args[i]) == 0) {
                     created[i] = 1;
                 } else {
@@ -553,17 +575,31 @@ Java_com_mewmix_glaive_core_NativeCore_nativeFillBuffer(JNIEnv *env, jobject cla
                     stat_worker_thread(&args[i]);
                 }
             }
-            for (int i = 0; i < NUM_STAT_THREADS; i++) {
+            for (int i = 0; i < num_threads; i++) {
                 if (created[i]) pthread_join(threads[i], NULL);
             }
+            free(threads);
+            free(created);
+            free(args);
         }
     }
-    close(fd);
+
+    clock_gettime(CLOCK_MONOTONIC, &t2);
 
     // PHASE 3: SORT & OUTPUT (SERIAL)
     g_sort_mode = sortMode;
     g_sort_asc = asc;
     qsort(entries, count, sizeof(GlaiveEntry), compare_entries);
+    clock_gettime(CLOCK_MONOTONIC, &t3);
+
+    // If we skipped full stat (name/type sort), populate metadata for the visible window
+    if (count > 0 && !need_full_stat) {
+        size_t window = count < 200 ? count : 200;
+        if (window > 0) {
+            StatWorkerArgs argsw = { .dirfd = fd, .entries = entries, .start_index = 0, .end_index = window };
+            stat_worker_thread(&argsw);
+        }
+    }
 
     unsigned char *head = buffer;
     unsigned char *end = buffer + capacity;
@@ -593,9 +629,19 @@ Java_com_mewmix_glaive_core_NativeCore_nativeFillBuffer(JNIEnv *env, jobject cla
         free(entries[i].name);
     }
     free(entries);
+    free(kbuf);
+    close(fd);
 
     (*env)->ReleaseStringUTFChars(env, jPath, path);
-    return (jint)(head - buffer);
+    clock_gettime(CLOCK_MONOTONIC, &t4);
+    long read_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    long stat_ms = (t2.tv_sec - t1.tv_sec) * 1000 + (t2.tv_nsec - t1.tv_nsec) / 1000000;
+    long sort_ms = (t3.tv_sec - t2.tv_sec) * 1000 + (t3.tv_nsec - t2.tv_nsec) / 1000000;
+    long out_ms  = (t4.tv_sec - t3.tv_sec) * 1000 + (t4.tv_nsec - t3.tv_nsec) / 1000000;
+    int bytes = (int)(head - buffer);
+    long stats = atomic_load(&g_stat_calls);
+    LOGE("LIST timings: read=%ldms stat=%ldms sort=%ldms out=%ldms entries=%zu stat_calls=%ld bytes=%d", read_ms, stat_ms, sort_ms, out_ms, count, stats, bytes);
+    return bytes;
 }
 
 // ==========================================
@@ -607,7 +653,7 @@ typedef struct {
     const SearchContext* ctx;
 } WorkerArgs;
 
-#define LOCAL_BUF_SIZE 16384
+#define LOCAL_BUF_SIZE 65536
 
 void* worker_thread(void* arg) {
     WorkerArgs* args = (WorkerArgs*)arg;
@@ -633,16 +679,24 @@ void* worker_thread(void* arg) {
 
         int fd = open(item->path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (fd != -1) {
-            char kbuf[4096] __attribute__((aligned(8)));
+            size_t kbuf_size2 = 65536; // 64KB
+            char* kbuf2 = (char*)malloc(kbuf_size2);
+            if (!kbuf2) {
+                close(fd);
+                free(item->path);
+                free(item);
+                queue_worker_done(q);
+                continue;
+            }
             struct linux_dirent64 *d;
             int nread;
 
-            while ((nread = syscall(__NR_getdents64, fd, kbuf, sizeof(kbuf))) > 0) {
+            while ((nread = syscall(__NR_getdents64, fd, kbuf2, kbuf_size2)) > 0) {
                 if (atomic_load(&g_cancel_search)) break;
 
                 int bpos = 0;
                 while (bpos < nread) {
-                    d = (struct linux_dirent64 *)(kbuf + bpos);
+                    d = (struct linux_dirent64 *)(kbuf2 + bpos);
                     bpos += d->d_reclen;
                     if (d->d_name[0] == '.') continue;
 
@@ -710,6 +764,7 @@ void* worker_thread(void* arg) {
                     }
                 }
             }
+            free(kbuf2);
             close(fd);
         }
         free(item->path);
@@ -759,8 +814,12 @@ Java_com_mewmix_glaive_core_NativeCore_nativeSearch(JNIEnv *env, jobject clazz, 
     root_dup[base_len] = 0;
     queue_push(&q, root_dup, base_len);
 
-    #define NUM_THREADS 4
-    pthread_t threads[NUM_THREADS];
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cores < 1) cores = 4;
+    int NUM_THREADS = (int)cores;
+    if (NUM_THREADS < 4) NUM_THREADS = 4;
+    if (NUM_THREADS > 8) NUM_THREADS = 8;
+    pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * NUM_THREADS);
     WorkerArgs args = { .queue = &q, .gbuf = &gbuf, .ctx = &ctx };
 
     for (int i = 0; i < NUM_THREADS; i++) {
@@ -769,6 +828,7 @@ Java_com_mewmix_glaive_core_NativeCore_nativeSearch(JNIEnv *env, jobject clazz, 
     for (int i = 0; i < NUM_THREADS; i++) {
         pthread_join(threads[i], NULL);
     }
+    free(threads);
 
     queue_destroy(&q);
     int result_len = (int)(gbuf.current - gbuf.start);
