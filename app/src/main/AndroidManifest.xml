@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
+    <permission android:name="com.mewmix.glaive.permission.ACCESS_TOOLS"
+        android:protectionLevel="signature" />
+
     <application
         android:requestLegacyExternalStorage="true"
         android:allowBackup="true"
@@ -37,6 +40,23 @@
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name=".bridge.ToolProvider"
+            android:authorities="com.mewmix.glaive.tool_provider"
+            android:exported="true"
+            android:permission="com.mewmix.glaive.permission.ACCESS_TOOLS" />
+
+        <activity
+            android:name=".bridge.BridgeActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:permission="com.mewmix.glaive.permission.ACCESS_TOOLS">
+            <intent-filter>
+                <action android:name="com.mewmix.glaive.ACTION_EXECUTE_TOOL" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
     </application>
